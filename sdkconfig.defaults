@@ -1,0 +1,21 @@
+# ESP32-C3 + SSD1315(128x32 单色 OLED) Agent 状态栏 —— 默认配置
+#
+# 注意：如果 build/ 目录或 sdkconfig 是旧的，本文件的部分选项可能不会生效，
+#       此时执行 `idf.py fullclean` 后重新构建，或直接 `rm sdkconfig`。
+
+# ------------------------- LVGL -------------------------
+# 单色屏必须打开 I1 颜色格式的软件渲染开关
+CONFIG_LV_DRAW_SW_SUPPORT_I1=y
+
+# 界面主行用 LVGL 自带的思源黑体 14px（含 ASCII + 常用汉字，约 120KB）
+CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_14_CJK=y
+# LVGL 主题默认字体仍需保留
+CONFIG_LV_FONT_MONTSERRAT_14=y
+
+# 反锯齿灰度转 1bpp 的阈值，调小字会更粗（默认 127）
+# CONFIG_LV_DRAW_SW_I1_LUM_THRESHOLD=110
+
+# ------------------------- 控制台 -------------------------
+# 日志走 UART0；USB Serial/JTAG 只注册 VFS 供本程序收发数据
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y

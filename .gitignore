@@ -1,0 +1,37 @@
+# ---- ESP-IDF ----
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+*.bin
+*.elf
+*.map
+*.pyc
+
+# ---- VS Code / clangd ----
+.vscode
+.cache/
+compile_commands.json
+
+# ---- Python (tools/mock_status.py 用 PEP 723，依赖由 uv 缓存，不在仓库里) ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.uv/
+.uv-cache/
+
+# ---- Pi 扩展 ----
+node_modules/
+*.tsbuildinfo
+
+# ---- 编辑器 / 系统 ----
+.idea/
+*.swp
+*~
+.DS_Store
+
+# ---- 本地覆盖 ----
+*.local
+.env

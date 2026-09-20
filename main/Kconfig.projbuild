@@ -1,0 +1,107 @@
+menu "Vibe Coding Status Bar"
+
+    menu "Display (SSD1315 / SSD1306 OLED)"
+
+        config STATUS_BAR_LCD_H_RES
+            int "LCD horizontal resolution"
+            range 64 256
+            default 128
+
+        config STATUS_BAR_LCD_V_RES
+            int "LCD vertical resolution (32 for 0.96 inch bar screen)"
+            range 16 64
+            default 32
+
+        config STATUS_BAR_I2C_SDA_GPIO
+            int "I2C SDA GPIO"
+            default 8
+            help
+                注意：ESP32-C3 的 USB 占用了 GPIO18(D-) / GPIO19(D+)，
+                不要与这两个引脚冲突。
+
+        config STATUS_BAR_I2C_SCL_GPIO
+            int "I2C SCL GPIO"
+            default 9
+
+        config STATUS_BAR_I2C_FREQ_HZ
+            int "I2C clock frequency (Hz)"
+            default 400000
+
+        config STATUS_BAR_I2C_ADDR
+            hex "I2C slave address (7-bit)"
+            default 0x3C
+            help
+                常见 OLED 模块为 0x3C，少数为 0x3D。
+
+        config STATUS_BAR_LCD_RST_GPIO
+            int "LCD reset GPIO (-1 if the module has no RST pin)"
+            default -1
+
+        config STATUS_BAR_LCD_MIRROR_X
+            bool "Mirror X"
+            default n
+
+        config STATUS_BAR_LCD_MIRROR_Y
+            bool "Mirror Y"
+            default n
+
+        config STATUS_BAR_LCD_INVERT
+            bool "Invert colors"
+            default n
+            help
+                若显示内容黑白反了（背景发亮、文字变黑），打开此项。
+
+    endmenu
+
+    menu "UI"
+
+        config STATUS_BAR_PAGE_INTERVAL_MS
+            int "Carousel page interval (ms, 0 = disable carousel)"
+            default 4000
+
+        config STATUS_BAR_REFRESH_MS
+            int "UI refresh period (ms)"
+            range 50 2000
+            default 200
+
+        config STATUS_BAR_LINK_TIMEOUT_MS
+            int "Host link timeout (ms)"
+            default 5000
+            help
+                超过该时间没有收到 host 数据，屏幕会提示 NO HOST。
+
+        config STATUS_BAR_BOOT_SELFTEST
+            bool "Flash the whole screen once at boot (bring-up check)"
+            default y
+            help
+                上电后整屏点亮 400ms 再熄灭，用来确认屏幕接线、I2C、
+                刷新链路和单色转换都正常。调通之后可以关掉。
+
+    endmenu
+
+    menu "USB Serial/JTAG link"
+
+        config STATUS_BAR_RX_BUFFER_SIZE
+            int "USB Serial/JTAG RX ring buffer size"
+            default 1024
+
+        config STATUS_BAR_TX_BUFFER_SIZE
+            int "USB Serial/JTAG TX ring buffer size"
+            default 512
+
+        config STATUS_BAR_MAX_LINE_LEN
+            int "Max JSON line length (bytes)"
+            range 128 2048
+            default 512
+
+        config STATUS_BAR_HEARTBEAT_MS
+            int "Heartbeat interval to host (ms, 0 = disable)"
+            default 10000
+
+        config STATUS_BAR_LOG_RX
+            bool "Log every received JSON line"
+            default n
+
+    endmenu
+
+endmenu

@@ -1,0 +1,14 @@
+## ESP 端依赖清单
+## 首次构建时组件管理器会自动下载到 managed_components/
+dependencies:
+  idf: ">=5.3"
+
+  # JSON 解析（IDF v6 起内置的 json/cJSON 组件已被移除，改用组件仓库版本）
+  espressif/cjson: ">=1.7.19"
+
+  # LVGL 移植层
+  espressif/esp_lvgl_port: "^2.9.0"
+
+  # LVGL 图形库（9.5 与 esp_lvgl_port 2.9 搭配验证过）
+  # 主行字体直接用 LVGL 自带的 lv_font_source_han_sans_sc_14_cjk（见 sdkconfig.defaults）
+  lvgl/lvgl: "~9.5.0"
