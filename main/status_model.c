@@ -9,11 +9,12 @@
  *               由 host 直接下发它自己显示的那个数，省得两边各算一遍算不到一起；
  *               负数表示未知（例如刚压缩完还没新回复），UI 会显示 "--"。
  *               没给时才退回用 ctx/ctx_max 自己算
+ *   cache_pct : 缓存命中百分比（0.1 精度）   别名 cache_percent/cache_hit/cache_hit_rate
+ *               同样是 host 直接下发（Pi 底栏那个 CH 值）；负数 / 没给 = 未知，UI 就把这一栏收起来
  *   in        : 输入 token                  别名 in_tokens/input/input_tokens/tokens_in
  *   out       : 输出 token                  别名 out_tokens/output/output_tokens/tokens_out
  *   tps       : token/s                     别名 tok_s/tokens_per_second
  *   elapsed   : 当前步骤耗时(秒)            别名 elapsed_s/duration/dur
- *   turn      : 轮次/步骤序号               别名 step/round/iteration
  */
 #include "status_model.h"
 
@@ -158,6 +159,13 @@ static bool get_ctx_pct(const cJSON *o, double *out)
     return json_num_any(o, keys, NUM_KEYS(keys), out);
 }
 
+static bool get_cache_pct(const cJSON *o, double *out)
+{
+    /* 和 ctx_pct 同理：host 直接给它显示的那个缓存命中率（Pi 底栏的 CH） */
+    static const char *const keys[] = { "cache_pct", "cache_percent", "cache_hit", "cache_hit_rate" };
+    return json_num_any(o, keys, NUM_KEYS(keys), out);
+}
+
 static bool get_tok_in(const cJSON *o, double *out)
 {
     static const char *const keys[] = { "in", "in_tokens", "input", "input_tokens", "tokens_in", "prompt_tokens" };
@@ -179,12 +187,6 @@ static bool get_tps(const cJSON *o, double *out)
 static bool get_elapsed(const cJSON *o, double *out)
 {
     static const char *const keys[] = { "elapsed", "elapsed_s", "elapsed_sec", "duration", "duration_s", "dur" };
-    return json_num_any(o, keys, NUM_KEYS(keys), out);
-}
-
-static bool get_turn(const cJSON *o, double *out)
-{
-    static const char *const keys[] = { "turn", "step", "round", "iteration" };
     return json_num_any(o, keys, NUM_KEYS(keys), out);
 }
 
@@ -222,6 +224,7 @@ void status_model_init(void)
     memset(&s_m, 0, sizeof(s_m));
     s_m.st.tps = -1.0f;
     s_m.st.ctx_pct = -1.0f;
+    s_m.st.cache_pct = -1.0f;
     s_m.st.state = AGENT_STATE_UNKNOWN;
     copy_str(s_m.st.state_name, "UNKNOWN", sizeof(s_m.st.state_name));
     s_m.host_elapsed_s = -1.0f;
@@ -236,6 +239,17 @@ void status_model_mark_rx(void)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_m.last_rx_us = esp_timer_get_time();
     s_m.st.host_seen = true;
+    s_m.st.host_gone = false;   /* 又收到数据了，host 回来了 */
+    xSemaphoreGive(s_lock);
+}
+
+void status_model_mark_host_gone(void)
+{
+    if (s_lock == NULL) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_m.st.host_gone = true;
     xSemaphoreGive(s_lock);
 }
 
@@ -252,6 +266,7 @@ void status_model_reset(void)
     memset(&s_m.st, 0, sizeof(s_m.st));
     s_m.st.tps = -1.0f;
     s_m.st.ctx_pct = -1.0f;
+    s_m.st.cache_pct = -1.0f;
     s_m.st.host_seen = seen;
     s_m.st.rev = rev;
     copy_str(s_m.st.state_name, "UNKNOWN", sizeof(s_m.st.state_name));
@@ -281,11 +296,11 @@ bool status_model_apply_json(const cJSON *obj)
     if (get_ctx_used(obj, &v))  { s_m.st.ctx_used = to_u32(v); touched = true; }
     if (get_ctx_max(obj, &v))   { s_m.st.ctx_max  = to_u32(v); touched = true; }
     if (get_ctx_pct(obj, &v))   { s_m.st.ctx_pct  = (float)v;  touched = true; }
+    if (get_cache_pct(obj, &v)) { s_m.st.cache_pct = (float)v; touched = true; }
     if (get_tok_in(obj, &v))    { s_m.st.tok_in   = to_u32(v); touched = true; }
     if (get_tok_out(obj, &v))   { s_m.st.tok_out  = to_u32(v); touched = true; }
     if (get_tps(obj, &v))       { s_m.st.tps      = (float)v;  touched = true; }
     if (get_elapsed(obj, &v))   { s_m.host_elapsed_s = (float)v; touched = true; }
-    if (get_turn(obj, &v))      { s_m.st.turn     = to_u32(v); touched = true; }
 
     if (touched) {
         s_m.st.rev++;
@@ -315,6 +330,10 @@ void status_model_get(agent_status_t *out)
         }
         out->age_ms = (uint32_t)(age_us / 1000);
         out->link_up = age_us <= (int64_t)CONFIG_STATUS_BAR_LINK_TIMEOUT_MS * 1000;
+        if (s_m.st.host_gone) {
+            /* host 说过要走了（Pi 退出），不用再等超时 */
+            out->link_up = false;
+        }
     }
 
     if (s_m.host_elapsed_s >= 0.0f) {

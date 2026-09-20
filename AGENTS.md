@@ -50,27 +50,36 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 - 版式：左侧 `x=0..17` 是 18x16 的状态图标，右侧 `x=20..127` 两行文字（**左对齐**，数值位数
   变化时整行不会左右抖）。主行 `y=0..15` 用 LVGL 自带 `lv_font_source_han_sans_sc_14_cjk`
   （行高 17，字形占 0..14，约 157KB），副行 `y=16..31` 用自造的 13px ASCII 子集（行高 15）
-- 右列只有 108px，改文案前先按字宽算一遍：14px 数字 7.69px / 空格 3.12px，
-  13px 数字 7.19px / 空格 2.94px / `:` 3.62px（`%` 有 12px 宽，容易撑爆）
-- 主行有两套版式（`ui.c:set_main_row()`）：
-  - CTX 页：整行一个 label，不写 `CTX` 前缀，数值按 **1000 进制阶梯**退化
-    （`fmt_ctx()`：999 → 999，1000 → 1K，1000000 → 1M，截断取整）。
+- 主行有两套版式，都是 flex 容器（`ui.c:set_main_row()`，同一行混不了两种字体，所以各段独立 label）：
+  - CTX 页：`28K/200K`（14px 主字体）+ `95.4%` 缓存命中率（13px 副字体）。不写 `CTX` 前缀，
+    数值按 **1000 进制阶梯**退化（`fmt_ctx()`：999 → 999，1000 → 1K，1000000 → 1M，截断取整）。
     用 1000 而不是 1024，是因为模型窗口都是十进制标称的（200000 / 1000000），
-    这样才显示得成 `200K` / `1M`
-  - TOK 页：`↑ 1.2k ↓ 567`。箭头是 montserrat 符号、数字是思源黑体，**同一行混不了两种字体**，
-    所以塞进一个 flex 容器（`s_tok_row`）各占一个定宽 label
+    这样才显示得成 `200K` / `1M`。缓存命中率主机不给就把右段收起来、左段撑满整行
+  - TOK 页：`↑ 1.2k ↓ 567`。箭头是 montserrat 符号、数字是思源黑体
 - `fmt_count()` 的分段和取整必须和 Pi 底栏 `formatTokens()`（`footer.js`）**逐条对齐**：
   `<1000` 原样 / `<10k` 一位小数 / `<1M` 四舍五入到 k / `<10M` 一位小数 M / 其余四舍五入到 M。
   改任一边都要同步，否则会出现「屏幕 29k、底栏 30k」这种对不上的情况
-- 上下文百分比**由主机下发**（`ctx_pct`，1 位小数，负数 = 未知 → 显示 `--`），ESP 不重算。
-  JS 那边是 `percent.toFixed(1)`（按 double 舍入），一边整数一边浮点必然在某些值上差一档
-  （例：300/200000 精确等于 0.15%，JS 的 double 是 0.14999… → `0.1%`，精确十进制会给 `0.2%`）。
-  只有主机没给 `ctx_pct` 时才退回用 `ctx/ctx_max` 自己算（`tools/mock_status.py` 走这条）
-- CTX 页副行要放 `100.0%`，最宽 4*7.1875 + 3.625(.) + 12(%) = 44.4px，所以进度条只占 60px
-  （`BAR_W=60` → `PCT_X=82`、`PCT_W=46`）。改宽度前先按 `.adv_w/16` 算一遍
+- 上下文百分比 / 缓存命中率**都由主机下发**（`ctx_pct` / `cache_pct`，1 位小数，
+  负数 = 未知），ESP 不重算。JS 那边是 `toFixed(1)`（按 double 舍入），一边整数一边浮点必然
+  在某些值上差一档（例：300/200000 精确等于 0.15%，JS 的 double 是 0.14999… → `0.1%`，
+  精确十进制会给 `0.2%`）。`ctx_pct` 没给时才退回用 `ctx/ctx_max` 自己算
+  （`tools/mock_status.py` 走这条）；`cache_pct` 推不出来，不给就不显示
+- 右列只有 108px，改文案前先按 `.adv_w/16` 量一遍（两套字体都能从字库源文件里解析出来）：
+  14px：数字 7.6875 / `/` 5.5 / `K` 8.94 / `%` 12.81 / 空格 3.125；
+  13px：数字 7.1875 / `.` 3.625 / `:` 3.625 / `%` 12 / 空格 2.94。
+  现在卡得最紧的是 CTX 页这两处，都是按「最坏取值」算出来的：
+  - 主行：最宽文本 `199K/200K` = 69.5px、缓存 `99.9%` = 37.2px → `CTX_MAIN_W=70`
+    + `CTX_CACHE_W=38` = 108px 刚好，中间不留间隔（靠字形侧边距分开）。
+    满命中只写 `100%`（`100.0%` 要 44.4px，会撑破右段）
+  - 副行：进度条 60px + 上下文占比 46px（`100.0%` = 44.4px）
 - TOK 页的 `↑/↓` 口径 = **整个会话累计**，并且和 Pi 底栏一样把 assistant 消息、toolResult
   消息、`type:"usage"` 条目（cache_warm 等）以及 compaction/branch_summary 的 usage 全算进去
   （Pi 扩展里的 `collectUsageTotals()`）。**不要改成「本轮累计」** —— 那是自造口径，只会和底栏打架
+- 累计值的刷新时机有坑：pi **先跑扩展 handler、再 `appendMessage`**（`agent-session.js:408-420`），
+  所以在 `message_end` 里立刻扫 entries **必然少掉刚结束的那条**，屏幕会一直慢一轮。
+  正确做法是落盘之后再算一次（扩展里 `scheduleStatsRefresh()` 延迟 30ms 防抖）+
+  `turn_end`（`agent-session.js:447` 注释说明了此时消息和 tool results 都已落盘）兜底。
+  这种「补算」必须绕开 `CTX_REFRESH_MS` 节流，否则会被吃掉
 - 状态改用图标表示：`lv_font_montserrat_14` 里带全套 FontAwesome 符号（`LV_SYMBOL_PLAY` 等），
   映射见 `ui.c:state_symbol()`；`thinking` 用 `lv_arc` 画的 90° 弧逐档旋转。
   **不要用 LVGL 内置 montserrat 排正文**：它的字形墨迹常宽于 advance（负边距），小字号会挤在一起；
@@ -84,11 +93,15 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 一行一条 JSON、`\n` 结尾，只有以 `{` 开头的行会被解析；字段全部可选、大小写不敏感：
 
 ```json
-{"state":"thinking","ctx":12000,"ctx_max":200000,"in":1234,"out":567,"tps":42.5,"elapsed":3.2,"turn":2}
+{"state":"thinking","ctx":12000,"ctx_max":200000,"ctx_pct":6.0,"cache_pct":94.9,"in":1234,"out":567,"tps":42.5,"elapsed":3.2}
 ```
 
 - `state`：`idle|thinking|running|tool|waiting|done|error`，也接受任意自定义字符串
-- 字段别名、命令（`ping`/`page`/`clear`）与下行事件（`boot`/`hb`/`pong`）见 `main/serial_link.c` 头部注释
+- 字段别名、命令（`ping`/`page`/`clear`/`bye`）与下行事件（`boot`/`hb`/`pong`）见 `main/serial_link.c` 头部注释
+- `{"cmd":"bye"}` 是主机主动退出（Pi 扩展在 `session_shutdown` 且 `reason=quit` 时发），
+  ESP 收到后把 `host_gone` 置位 → 立刻按断链渲染（`NO HOST` + 副行 `host exit`），
+  不必等 10s 超时。**`session_shutdown` 在切换/新建/分叉会话时也会发（`reason` 不是 `quit`），
+  那几种情况不能发 bye**，否则屏幕会白闪。下次收到任何主机数据时 `mark_rx()` 会清掉 `host_gone`
 - ESP 每 10s 发一次心跳；10s 收不到 host 数据就显示 `NO HOST`
   （`STATUS_BAR_LINK_TIMEOUT_MS`，要 ≥ 主机保活间隔的 3 倍）
 - **主机侧必须「双工 + raw」**：用 `O_RDWR` 打开串口并持续排空下行，且把 tty 设成

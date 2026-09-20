@@ -6,17 +6,18 @@
 
 ```
 ┌─────────────────────────────┐
-│  ▶  │ 28K/200K              │   CTX 页：上下文已用 / 窗口
-│     │ ▓▓▓▓▓▓░░░░░░░░ 14%    │           进度条 + 百分比
+│  ▶  │ 28K/200K     94.9%    │   CTX 页：已用 / 窗口 + 缓存命中率
+│     │ ▓▓▓▓▓▓░░░░░░░░ 14.2%  │           进度条 + 上下文占比
 ├─────────────────────────────┤
 │  ▶  │ ↑ 1.2k  ↓ 567         │   TOK 页：输入 / 输出 token
-│     │ 42.5 t/s  T3  12.4s   │           速度 / 轮次 / 耗时
+│     │ 42.5t/s  12.4s        │           速度 / 耗时
 └─────────────────────────────┘
    状态图标        108px 文本区
 ```
 
 左侧图标常驻表示状态（▶ 运行、齿轮 工具、⏳ 等待、✔ 完成、✖ 报错，`thinking` 是转动的弧），
-右侧 2 页自动轮播；链路断了会固定显示 `NO HOST`。
+右侧 2 页自动轮播；链路断了会固定显示 `NO HOST`（副行 `lost Ns` 是超时，`host exit` 是
+主机主动退出）。
 
 ## 硬件
 
@@ -85,7 +86,8 @@ uv run tools/mock_status.py --send '{"state":"error","tps":0}'
 ### 状态上报（host → ESP32）
 
 ```json
-{"state":"thinking","ctx":12000,"ctx_max":200000,"ctx_pct":6.0,"in":1234,"out":567,"tps":42.5,"elapsed":3.2,"turn":2}
+{"state":"thinking","ctx":12000,"ctx_max":200000,"ctx_pct":6.0,"cache_pct":94.9,
+ "in":1234,"out":567,"tps":42.5,"elapsed":3.2}
 ```
 
 | 字段 | 含义 | 别名 |
@@ -94,19 +96,19 @@ uv run tools/mock_status.py --send '{"state":"error","tps":0}'
 | `ctx` | 上下文已用 token | `ctx_used` `context` `context_tokens` `context_used` |
 | `ctx_max` | 上下文窗口 | `ctx_limit` `ctx_size` `ctx_window` `context_max` … |
 | `ctx_pct` | 上下文占用百分比（保留 1 位小数，屏幕直接显示这个数），**负数 = 未知** | `ctx_percent` `context_pct` `context_percent` |
+| `cache_pct` | 缓存命中百分比（保留 1 位小数），**不给 / 负数 = 屏幕不显示这一栏** | `cache_percent` `cache_hit` `cache_hit_rate` |
 | `in` | 累计输入 token | `in_tokens` `input` `input_tokens` `tokens_in` `prompt_tokens` |
 | `out` | 累计输出 token | `out_tokens` `output` `output_tokens` `tokens_out` `completion_tokens` |
 | `tps` | token/s | `tok_s` `tokens_per_second` `speed` |
 | `elapsed` | 当前步骤耗时（秒） | `elapsed_s` `duration` `dur` |
-| `turn` | 轮次 / 步骤序号 | `step` `round` `iteration` |
 
 没有 `state` 里的标准值时显示原始字符串（过滤成可打印的大写 ASCII）。
 数值写成字符串也能解析。
 
-`ctx_pct` 是**为了两个屏幕对得上**才单独下发的：主机自己算好它显示的那个百分比
-（Pi 扩展取 `getContextUsage().percent` 的 `toFixed(1)`）直接给过来，ESP 不再拿
-`ctx/ctx_max` 重算 —— 一边是 JS 按 double 舍入、一边是整数/F 运算，总会差一档。
-主机没给这个字段时才退回自己算（`tools/mock_status.py` 就是这种）。
+`ctx_pct` / `cache_pct` 是**为了两个屏幕对得上**才由主机直接下发的：主机自己算好它显示的
+那两个数（Pi 扩展取 `getContextUsage().percent` 和底栏的 `CH`）原样给过来，ESP 不再重算 ——
+一边是 JS 按 double 舍入、一边是整数/F 运算，总会差一档。`ctx_pct` 没给时 ESP 会退回用
+`ctx/ctx_max` 自己算（`tools/mock_status.py` 就是这种）；`cache_pct` 推不出来，不给就一直空着。
 
 ### 控制命令（host → ESP32）
 
@@ -114,7 +116,12 @@ uv run tools/mock_status.py --send '{"state":"error","tps":0}'
 {"cmd":"ping"}                       // → {"evt":"pong","up_ms":...,"page":...,"rx":...,"bad":...}
 {"cmd":"page","index":1,"hold":10}   // 切到第 1 页并保持 10 秒；index=-1 恢复自动轮播
 {"cmd":"clear"}                      // 清空统计
+{"cmd":"bye"}                        // host 要退出了：立刻按断链渲染（副行 host exit），不用等超时
 ```
+
+`bye` 由 Pi 扩展在真正退出时（`session_shutdown` 且 `reason=quit`）发出。切换/新建/分叉
+会话也会触发同一个事件，那几种情况不发，否则屏幕会白闪一下。超时断链仍然显示
+`lost Ns`，两者在副行上区分开；下一次收到任何主机数据时 `host_gone` 自动清除。
 
 ### 下行事件（ESP32 → host）
 

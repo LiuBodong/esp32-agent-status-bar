@@ -14,14 +14,13 @@
  * 文字一律左对齐：数值位数变化时整行不会左右抖动。
  *
  * 共 2 个页面自动轮播（原来的 STATE 页已取消，状态由左侧图标常驻表示）：
- *   0 CTX : 上下文 已用/全部 + 进度条
- *   1 TOK : ↑ 输入 ↓ 输出 token + 速度 + 轮次 + 耗时
+ *   0 CTX : 主行 `已用/窗口` + 缓存命中率，副行 进度条 + 上下文占用百分比
+ *   1 TOK : ↑ 输入 ↓ 输出 token + 速度 + 耗时
  *
- * 主行有两种版式：
- *   CTX 页：整行一个 label，不写 CTX 前缀，数值按 1000 进制阶梯退化
- *           （999 → 999，1000 → 1K，1000000 → 1M），所以永远是 "28K/200K" 这种形式
- *   TOK 页：↑ 1.2k ↓ 567 —— 箭头来自 montserrat 符号、数字用主字体，
- *           同一行没法混排两种字体，所以放在一个 flex 容器里各占一个 label
+ * 主行有两种版式，都是 flex 容器（同一行里混排两种字体）：
+ *   CTX 页：`28K/200K`（主字体）+ `95.4%`（副字体，缓存命中率，主机没给就收起来）。
+ *           上下文占用百分比在副行，数值按 1000 进制阶梯退化（999 → 999，1000 → 1K）
+ *   TOK 页：↑ 1.2k ↓ 567 —— 箭头来自 montserrat 符号、数字用主字体
  *
  * 没有收到过数据 / 链路超时 时，固定显示提示页。
  */
@@ -87,6 +86,15 @@ extern const lv_font_t lv_font_source_han_sans_cn_13_ascii;
 #define COL_X      (ICON_W + 2)           /* 20：图标列 + 2px 间隔 */
 #define COL_W      (SCREEN_W - COL_X)     /* 108 */
 
+/* CTX 页主行：左段 `已用/窗口`（主字体）+ 右段缓存命中率（副字体）。
+ * 两种字体放不进同一个 label，所以和 TOK 页一样用 flex 容器各占定宽。
+ * 宽度是量出来的（字库的 .adv_w 单位 1/16px，14px 数字 7.6875 / 13px 数字 7.1875 / % 12）：
+ *   最宽的主行文本 "199K/200K" = 69.5px，最宽的缓存百分比 "99.9%" = 37.2px
+ * 所以 70 + 38 = 108px 刚好，中间不加间隔，靠字形侧边距分开（视觉上约 2px）。
+ * 主机没给缓存命中率时右段会收起来，左段拿到整行 108px。 */
+#define CTX_MAIN_W  70
+#define CTX_CACHE_W (COL_W - CTX_MAIN_W)  /* 38 */
+
 #define ROW_MAIN_Y 0
 #define ROW_SUB_Y  16
 #define ROW_MAIN_H 16
@@ -110,8 +118,10 @@ extern const lv_font_t lv_font_source_han_sans_cn_13_ascii;
 
 static lv_obj_t *s_icon;        /* 状态图标（符号字形） */
 static lv_obj_t *s_spin;        /* thinking 专用的旋转弧 */
-static lv_obj_t *s_top;         /* 主行：CTX 页的整行文字 */
-static lv_obj_t *s_tok_row;     /* 主行：TOK 页的 flex 容器 */
+static lv_obj_t *s_ctx_row;     /* CTX 页主行：flex 容器 */
+static lv_obj_t *s_ctx_used;    /*   `已用/窗口`（也可能是自定义状态名） */
+static lv_obj_t *s_ctx_cache;   /*   缓存命中率 */
+static lv_obj_t *s_tok_row;     /* TOK 页主行：flex 容器 */
 static lv_obj_t *s_tok_in;      /*   ↑ 后面的输入 token */
 static lv_obj_t *s_tok_out;     /*   ↓ 后面的输出 token */
 static lv_obj_t *s_bot;         /* 副行 */
@@ -125,6 +135,7 @@ static uint32_t  s_page_start_ms;
 static uint32_t  s_hold_until_ms;
 static bool      s_bar_visible;
 static bool      s_tok_row_shown;
+static bool      s_ctx_cache_shown;   /* CTX 主行右段是否占着位置 */
 
 /* ------------------------------ 文本工具 ------------------------------ */
 
@@ -184,6 +195,20 @@ static void fmt_count(uint32_t value, bool known, char *out, size_t out_size)
             m++;
         }
         snprintf(out, out_size, "%uM", m);
+    }
+}
+
+/** 缓存命中率：主机直接给（和 Pi 底栏的 CH 同源），这里只管显示。
+ *  <0 = 未知（主机没给，或者 provider 不报缓存）→ 空串，右段收起来（Pi 底栏也是直接不显示） */
+static void fmt_cache_pct(float pct, char *out, size_t out_size)
+{
+    if (pct < 0.0f) {
+        out[0] = '\0';
+    } else if (pct >= 100.0f) {
+        /* "100.0%" 比 "99.9%" 宽 7px，会撑破右段 38px，所以满命中只写 100% */
+        snprintf(out, out_size, "100%%");
+    } else {
+        snprintf(out, out_size, "%.1f%%", (double)pct);
     }
 }
 
@@ -278,7 +303,27 @@ static void set_bar_visible(bool visible)
     }
 }
 
-/** 主行两套版式二选一：false = CTX 页整行文字，true = TOK 页的 ↑↓ 行 */
+/** CTX 主行两段一起设置；cache 传空串表示这一栏没有（左段就撑满整行） */
+static void set_ctx_main(const char *main_text, const char *cache_text)
+{
+    bool with_cache = cache_text != NULL && cache_text[0] != '\0';
+
+    if (with_cache != s_ctx_cache_shown) {
+        s_ctx_cache_shown = with_cache;
+        if (with_cache) {
+            lv_obj_set_width(s_ctx_used, CTX_MAIN_W);
+            lv_obj_remove_flag(s_ctx_cache, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_set_width(s_ctx_used, COL_W);
+            lv_obj_add_flag(s_ctx_cache, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    set_label_text(s_ctx_used, main_text);
+    set_label_text(s_ctx_cache, cache_text == NULL ? "" : cache_text);
+}
+
+/** 主行两套版式二选一：false = CTX 页（已用/窗口 + 缓存命中），true = TOK 页的 ↑↓ 行 */
 static void set_main_row(bool tok_row)
 {
     if (tok_row == s_tok_row_shown) {
@@ -287,10 +332,10 @@ static void set_main_row(bool tok_row)
     s_tok_row_shown = tok_row;
 
     if (tok_row) {
-        lv_obj_add_flag(s_top, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_ctx_row, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_tok_row, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_remove_flag(s_top, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_ctx_row, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_tok_row, LV_OBJ_FLAG_HIDDEN);
     }
 }
@@ -302,7 +347,7 @@ static void render_pending(void)
     set_icon(LV_SYMBOL_USB, 0);
     set_main_row(false);
     set_bar_visible(false);
-    set_label_text(s_top, "WAITING HOST");
+    set_ctx_main("WAITING HOST", "");
     set_label_text(s_bot, "no data on usb");
 }
 
@@ -312,8 +357,11 @@ static void render_lost(const agent_status_t *st)
     set_icon(LV_SYMBOL_CLOSE, 0);
     set_main_row(false);
     set_bar_visible(false);
-    set_label_text(s_top, "NO HOST");
-    if (st->age_ms >= 60000u) {
+    set_ctx_main("NO HOST", "");
+    if (st->host_gone) {
+        /* host 主动告别的（Pi 退出时发的 bye），跟超时区分开 */
+        snprintf(sub, sizeof(sub), "host exit");
+    } else if (st->age_ms >= 60000u) {
         snprintf(sub, sizeof(sub), "lost %um", (unsigned)(st->age_ms / 60000u));
     } else {
         snprintf(sub, sizeof(sub), "lost %us", (unsigned)(st->age_ms / 1000u));
@@ -325,6 +373,7 @@ static void render_page(const agent_status_t *st, uint32_t now_ms)
 {
     char main_text[40];
     char sub_text[32];
+    char cache_text[12];
 
     set_icon(state_symbol(st->state), now_ms);
 
@@ -352,12 +401,7 @@ static void render_page(const agent_status_t *st, uint32_t now_ms)
 
         char elapsed[16];
         fmt_duration(st->elapsed_s, elapsed, sizeof(elapsed));
-        if (st->turn > 0) {
-            snprintf(sub_text, sizeof(sub_text), "%st/s  #%u  %s",
-                     speed, (unsigned)st->turn, elapsed);
-        } else {
-            snprintf(sub_text, sizeof(sub_text), "%st/s  %s", speed, elapsed);
-        }
+        snprintf(sub_text, sizeof(sub_text), "%st/s  %s", speed, elapsed);
         set_label_text(s_bot, sub_text);
         break;
     }
@@ -375,13 +419,14 @@ static void render_page(const agent_status_t *st, uint32_t now_ms)
         fmt_ctx(st->ctx_max, pct_known, total, sizeof(total));
 
         if (st->state == AGENT_STATE_UNKNOWN && st->state_name[0] != '\0') {
-            /* 自定义状态没有对应图标，主行退回显示它的名字 */
+            /* 自定义状态没有对应图标，主行退回显示它的名字（这时候不留缓存位置，给名字让宽度） */
             snprintf(main_text, sizeof(main_text), "%s", st->state_name);
+            cache_text[0] = '\0';
         } else {
-            /* 最长 "4294M/4294M"，实测 89px，恒在右列宽度内 */
             snprintf(main_text, sizeof(main_text), "%s/%s", used, total);
+            fmt_cache_pct(st->cache_pct, cache_text, sizeof(cache_text));
         }
-        set_label_text(s_top, main_text);
+        set_ctx_main(main_text, cache_text);
 
         /* 百分比优先用 host 直接给的那个数（= 它底栏显示的值，0.1 精度），
          * 主机没给（例如 tools/mock_status.py）才退回用 ctx/ctx_max 自己算。
@@ -470,8 +515,21 @@ void ui_init(lv_display_t *disp)
     s_icon = create_label(scr, FONT_ICON, ICON_W, ICON_H, LV_TEXT_ALIGN_CENTER);
     lv_obj_set_pos(s_icon, 0, ICON_Y);
 
-    s_top = create_label(scr, FONT_MAIN, COL_W, ROW_MAIN_H, LV_TEXT_ALIGN_LEFT);
-    lv_obj_set_pos(s_top, COL_X, ROW_MAIN_Y);
+    /* CTX 页主行：`已用/窗口`（主字体）+ 缓存命中率（副字体）两种字体混排，
+     * 和 TOK 页一样用 flex 容器各占一个定宽 label（见 CTX_MAIN_W 的注释） */
+    s_ctx_row = lv_obj_create(scr);
+    lv_obj_remove_style_all(s_ctx_row);
+    lv_obj_remove_flag(s_ctx_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_ctx_row, COL_X, ROW_MAIN_Y);
+    lv_obj_set_size(s_ctx_row, COL_W, ROW_MAIN_H);
+    lv_obj_set_flex_flow(s_ctx_row, LV_FLEX_FLOW_ROW);   /* 必须在 remove_style_all 之后 */
+    lv_obj_set_flex_align(s_ctx_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_ctx_row, 0, 0);        /* 两段之间靠字形侧边距分开 */
+
+    s_ctx_used = create_label(s_ctx_row, FONT_MAIN, CTX_MAIN_W, ROW_MAIN_H, LV_TEXT_ALIGN_LEFT);
+    s_ctx_cache = create_label(s_ctx_row, FONT_SUB, CTX_CACHE_W, ROW_MAIN_H, LV_TEXT_ALIGN_LEFT);
+    /* 初始当成「有缓存栏」，第一次 set_ctx_main() 会按实际情况摆好宽度/隐藏 */
+    s_ctx_cache_shown = true;
 
     s_bot = create_label(scr, FONT_SUB, COL_W, ROW_SUB_H, LV_TEXT_ALIGN_LEFT);
     lv_obj_set_pos(s_bot, COL_X, ROW_SUB_Y);

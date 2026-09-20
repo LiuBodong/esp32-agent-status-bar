@@ -14,8 +14,8 @@ extern "C" {
 
 /** 页面编号 */
 typedef enum {
-    UI_PAGE_CTX = 0,    /* 上下文占用 + 进度条 */
-    UI_PAGE_TOK,        /* 输入/输出 token + 速度 + 轮次 + 耗时 */
+    UI_PAGE_CTX = 0,    /* 已用/窗口 + 缓存命中率 + 进度条 + 上下文占比 */
+    UI_PAGE_TOK,        /* 输入/输出 token + 速度 + 耗时 */
     UI_PAGE_COUNT,
 } ui_page_t;
 

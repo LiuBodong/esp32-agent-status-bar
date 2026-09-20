@@ -31,13 +31,14 @@ typedef struct {
     uint32_t ctx_used;                          /* 上下文已用 token */
     uint32_t ctx_max;                           /* 上下文窗口大小，0 = 未知 */
     float    ctx_pct;                           /* 上下文占用百分比，<0 = 未知（由 host 直接给） */
+    float    cache_pct;                         /* 缓存命中百分比，<0 = 未知（由 host 直接给） */
     uint32_t tok_in;                            /* 最近一次请求输入 token */
     uint32_t tok_out;                           /* 最近一次回复输出 token */
     float    tps;                               /* token/s，<0 表示未知 */
     float    elapsed_s;                         /* 当前步骤耗时：host 值优先，否则本地计时 */
-    uint32_t turn;                              /* 轮次 / 步骤序号 */
     bool     link_up;                           /* 最近 STATUS_BAR_LINK_TIMEOUT_MS 内收到过数据 */
     bool     host_seen;                         /* 上电后是否收到过任何数据 */
+    bool     host_gone;                         /* host 主动告别（Pi 退出时发的 bye），立刻按断链渲染 */
     uint32_t age_ms;                            /* 距上一次收到 host 数据的时间 */
     uint32_t rev;                               /* 每次成功更新 +1 */
 } agent_status_t;
@@ -51,8 +52,11 @@ void status_model_get(agent_status_t *out);
 /** @brief 复位所有状态（保留链路信息） */
 void status_model_reset(void);
 
-/** @brief 标记「刚收到 host 数据」，用于链路存活判定 */
+/** @brief 标记「刚收到 host 数据」，用于链路存活判定（同时清掉 host_gone） */
 void status_model_mark_rx(void);
+
+/** @brief 标记「host 主动断开了」（收到 bye），立刻按断链渲染，不必等超时 */
+void status_model_mark_host_gone(void);
 
 /**
  * @brief 用一条已解析的 JSON 对象更新状态

@@ -5,9 +5,9 @@
  * 只有以 '{' 开头的行才会被解析，其它内容（比如日志回显）会被忽略。
  *
  * 状态字段（host -> ESP，全部可选，字段别名见 status_model.c）：
- *   {"state":"thinking","ctx":12000,"ctx_max":200000,"ctx_pct":6.0,
- *    "in":1234,"out":567,"tps":42.5,"elapsed":3.2,"turn":2}
- *   ctx_pct 由 host 直接给（它自己显示的那个百分比，1 位小数；负数 = 未知），
+ *   {"state":"thinking","ctx":12000,"ctx_max":200000,"ctx_pct":6.0,"cache_pct":94.9,
+ *    "in":1234,"out":567,"tps":42.5,"elapsed":3.2}
+ *   ctx_pct / cache_pct 由 host 直接给（它自己显示的那两个百分比，1 位小数；负数 = 未知），
  *   免得两边各算一遍算不到一起。
  *
  * 控制命令（host -> ESP）：
@@ -15,6 +15,8 @@
  *   {"cmd":"page","index":1,"hold":10}     -> 切到第 1 页并保持 10 秒；index=-1 恢复自动轮播
  *                                             （共 2 页：0=CTX，1=TOK；超出会取模）
  *   {"cmd":"clear"}                        -> 清空统计
+ *   {"cmd":"bye"}                          -> host 要退出了：立刻按断链渲染（副行显示 host exit），
+ *                                             不必等 STATUS_BAR_LINK_TIMEOUT_MS 超时。不回 ack
  *
  * 下行事件（ESP -> host）：
  *   {"evt":"boot",...}   上电/复位后
@@ -160,6 +162,15 @@ static void handle_command(const cJSON *obj)
     if (strcmp(cmd->valuestring, "clear") == 0) {
         status_model_reset();
         send_jsonf("{\"evt\":\"ack\",\"cmd\":\"clear\"}");
+        return;
+    }
+
+    if (strcmp(cmd->valuestring, "bye") == 0) {
+        /* host 要退出了（Pi 的 session_shutdown/reason=quit）：
+         * 立刻按断链渲染，省得屏幕把最后一次状态挂到超时为止。
+         * 刻意不回 ack —— 对面马上就要关串口了，回包没人读；
+         * 下一次收到任何主机数据时 host_gone 会自动清掉。 */
+        status_model_mark_host_gone();
         return;
     }
 

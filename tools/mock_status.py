@@ -71,6 +71,8 @@ def reader_loop(ser: serial.Serial, stop: threading.Event) -> None:
 
 
 def step(ser: serial.Serial, **payload) -> None:
+    """补上只有主机知道的那个缓存命中率（ESP 自己推不出来，不给就一直空着）。"""
+    payload.setdefault("cache_pct", round(random.uniform(88.0, 100.0), 1))
     send(ser, payload)
 
 
@@ -80,12 +82,12 @@ def run_demo(ser: serial.Serial, interval: float) -> None:
     ctx = 8_400
 
     step(ser, state="idle", ctx=ctx, ctx_max=ctx_max, tok_in=0, tok_out=0,
-         tps=0, elapsed=0, turn=0)
+         tps=0, elapsed=0)
     time.sleep(interval)
 
-    for turn in range(1, 4):
+    for _ in range(3):
         ctx += random.randint(400, 1500)
-        step(ser, state="thinking", ctx=ctx, ctx_max=ctx_max, turn=turn, elapsed=0)
+        step(ser, state="thinking", ctx=ctx, ctx_max=ctx_max, elapsed=0)
         time.sleep(interval)
 
         tok_in = random.randint(600, 2400)
@@ -96,17 +98,17 @@ def run_demo(ser: serial.Serial, interval: float) -> None:
             tok_out = int(tok_in * 0.2 + (i + 1) * tps * interval)
             step(ser, state="running", ctx=ctx + tok_in + tok_out, ctx_max=ctx_max,
                  **{"in": tok_in, "out": tok_out}, tps=round(tps, 1),
-                 turn=turn, elapsed=round((i + 1) * interval, 2))
+                 elapsed=round((i + 1) * interval, 2))
             time.sleep(interval)
 
         ctx += tok_in + tok_out
         step(ser, state="tool", ctx=ctx, ctx_max=ctx_max,
              **{"in": tok_in, "out": tok_out}, tps=round(tps, 1),
-             turn=turn, elapsed=2.4)
+             elapsed=2.4)
         time.sleep(interval)
 
     step(ser, state="done", ctx=ctx, ctx_max=ctx_max, tok_in=1234, tok_out=5678,
-         tps=48.3, turn=3, elapsed=12.7)
+         tps=48.3, elapsed=12.7)
     time.sleep(interval)
 
 

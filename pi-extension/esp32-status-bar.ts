@@ -42,6 +42,8 @@ const PENDING_MAX = 4096;
 const RECONNECT_MS = 5000;
 /** 上下文用量的刷新间隔：getContextUsage() 会做估算，不要每帧都调 */
 const CTX_REFRESH_MS = 1000;
+/** message_end 之后等一拍再扫 entries 的延时（pi 是先跑 handler 再落盘） */
+const STATS_SETTLE_MS = 30;
 /** 一轮结束后让 DONE 在屏幕上停留的时长 */
 const DONE_HOLD_MS = 2500;
 
@@ -55,8 +57,9 @@ interface Snapshot {
 	tokensIn: number;
 	/** 本会话累计输出 token（屏幕上显示 OUT/下行） */
 	tokensOut: number;
+	/** 最后一条 assistant 消息的缓存命中率（%），-1 = 未知/没有缓存数据 */
+	cachePct: number;
 	tps: number;
-	turn: number;
 	model: string | null;
 }
 
@@ -66,6 +69,8 @@ interface UsageTotals {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	/** 最后一条 assistant 消息的缓存命中率（%，已保留 1 位），-1 = 没有 */
+	cachePct: number;
 }
 
 /* ------------------------------ 串口 ------------------------------ */
@@ -300,6 +305,16 @@ class SerialLink {
 		this.stats = null;
 		this.lastRxAt = 0;
 	}
+
+	/** 退出前把 pending 冲干净（写不进去就重试几次），然后关串口 */
+	async shutdown(): Promise<void> {
+		for (let i = 0; i < 5; i++) {
+			this.flush(Date.now());
+			if (this.pending.length === 0) break;
+			await new Promise((resolve) => setTimeout(resolve, 30));
+		}
+		this.close();
+	}
 }
 
 /* ------------------------------ 扩展主体 ------------------------------ */
@@ -320,8 +335,8 @@ export default function (pi: ExtensionAPI) {
 		ctxMax: 0,
 		tokensIn: 0,
 		tokensOut: 0,
+		cachePct: -1,
 		tps: 0,
-		turn: 0,
 		model: null,
 	};
 
@@ -337,6 +352,10 @@ export default function (pi: ExtensionAPI) {
 	/** 上下文占用百分比，-1 = 未知（pi 底栏此时显示 ?）。直接下发底栏那个数，
 	 * 别让 ESP 拿 ctx/ctx_max 自己算 —— 两边的舍入规则凑不到一位不差 */
 	let lastCtxPct = -1;
+	/** 最近一次拿到的 ExtensionContext：属性都是 live getter，可以在保活 tick 上复用 */
+	let lastCtx: ExtensionContext | null = null;
+	/** 落盘后补算一次的防抖定时器 */
+	let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 	let timer: ReturnType<typeof setInterval> | null = null;
 	let drainTimer: ReturnType<typeof setInterval> | null = null;
 	let notifiedMissing = false;
@@ -360,11 +379,11 @@ export default function (pi: ExtensionAPI) {
 			ctx: Math.round(lastCtxUsed),
 			ctx_max: Math.round(lastCtxMax),
 			ctx_pct: lastCtxPct,
+			cache_pct: snap.cachePct,
 			in: Math.round(snap.tokensIn),
 			out: Math.round(snap.tokensOut),
 			tps: Math.round(snap.tps * 10) / 10,
 			elapsed: Math.round(elapsedSeconds(now) * 10) / 10,
-			turn: snap.turn,
 		};
 		if (snap.model) payload.model = snap.model;
 		return JSON.stringify(payload);
@@ -373,20 +392,32 @@ export default function (pi: ExtensionAPI) {
 	/**
 	 * 按 pi 底栏（footer.js）的口径统计**整个会话**的 token：
 	 * 遍历 session entries，累加 assistant 消息、toolResult 消息、type:"usage" 条目
-	 * （如 cache_warm）以及 compaction / branch_summary 的 usage。
+	 * （如 cache_warm）以及 compaction / branch_summary 的 usage；
+	 * 顺带取最后一条 assistant 消息的缓存命中率（= 底栏那个 CH）。
 	 *
 	 * 必须和底栏一致，否则屏幕和 pi 底栏的数字对不上。注意这**不是**「本轮」的量：
 	 * 本轮量在屏幕上没有对应物，硬算出来只会和底栏打架。
 	 */
 	function collectUsageTotals(ctx: ExtensionContext): UsageTotals {
-		const totals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		const totals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cachePct: -1 };
 		for (const entry of ctx.sessionManager.getEntries()) {
 			let usage;
 			if (entry.type === "usage") {
 				usage = entry.usage;
 			} else if (entry.type === "message") {
-				if (entry.message.role === "assistant") usage = entry.message.usage;
-				else if (entry.message.role === "toolResult") usage = entry.message.usage;
+				if (entry.message.role === "assistant") {
+					usage = entry.message.usage;
+					/* 底栏就是这么算的：cacheRead / (input + cacheRead + cacheWrite)，
+					 * 而且以最后一条 assistant 消息为准（它为 0 就当没有） */
+					const promptTokens =
+						entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
+					totals.cachePct =
+						promptTokens > 0
+							? Number(((entry.message.usage.cacheRead / promptTokens) * 100).toFixed(1))
+							: -1;
+				} else if (entry.message.role === "toolResult") {
+					usage = entry.message.usage;
+				}
 			} else if (entry.type === "compaction" || entry.type === "branch_summary") {
 				usage = entry.usage;
 			}
@@ -399,8 +430,18 @@ export default function (pi: ExtensionAPI) {
 		return totals;
 	}
 
-	function refreshContextUsage(ctx: ExtensionContext | null, now: number): void {
-		if (ctx === null || now - lastCtxAt < CTX_REFRESH_MS) return;
+	/**
+	 * 重新读一遍 pi 的统计：上下文用量 + 整会话 token 累计（见 collectUsageTotals）。
+	 *
+	 * @param force 忽略 CTX_REFRESH_MS 节流。落盘后那一次必须 force，
+	 *              否则会被节流吃掉，屏幕就停在上一轮的数字上
+	 */
+	function refreshStats(ctx: ExtensionContext | null, now: number, force = false): void {
+		if (ctx === null) return;
+		/* ctx 是个 facade：runner.js:530 里那些属性都是「读 live state」的 getter，
+		 * 所以留一个下来，在没有事件的保活 tick 上也照样能读到当前会话的数据 */
+		lastCtx = ctx;
+		if (!force && now - lastCtxAt < CTX_REFRESH_MS) return;
 		lastCtxAt = now;
 		try {
 			const usage = ctx.getContextUsage();
@@ -424,13 +465,32 @@ export default function (pi: ExtensionAPI) {
 			const totals = collectUsageTotals(ctx);
 			snap.tokensIn = totals.input;
 			snap.tokensOut = totals.output;
+			snap.cachePct = totals.cachePct;
 		} catch {
 			/* 同上，取不到就沿用上次的值 */
 		}
 	}
 
+	/**
+	 * 延迟一拍再重算并推一帧。
+	 *
+	 * message_end 里不能立刻扫 entries：pi 是**先跑扩展 handler、再 appendMessage**
+	 * （agent-session.js:408-420），那一刻刚结束的消息还没落盘，扫出来必然少它一条，
+	 * 屏幕就一直显示上一轮的数。挪到下一个 macrotask 就稳稳在落盘之后了；
+	 * 30ms 防抖顺便把同一批事件合并成一次扫描。
+	 */
+	function scheduleStatsRefresh(): void {
+		if (refreshTimer !== null) return;
+		refreshTimer = setTimeout(() => {
+			refreshTimer = null;
+			const now = Date.now();
+			refreshStats(lastCtx, now, true);
+			link.send(buildLine(now), now, true);
+		}, STATS_SETTLE_MS);
+	}
+
 	function push(ctx: ExtensionContext | null, now: number, force = false): void {
-		refreshContextUsage(ctx, now);
+		refreshStats(ctx, now, force);
 		link.send(buildLine(now), now, force);
 	}
 
@@ -444,10 +504,9 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	/** 只重置「本轮」的量；tokensIn/Out 是整个会话的累计值，由 refreshContextUsage 维护 */
+	/** 只重置「本轮」的量；tokensIn/Out 是整个会话的累计值，由 refreshStats 维护 */
 	function resetRun(): void {
 		snap.tps = 0;
-		snap.turn = 0;
 		runElapsed = 0;
 		streamStartedAt = 0;
 		streamChars = 0;
@@ -476,8 +535,9 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (timer === null) {
-			/* 空闲时也要定期发，否则 ESP 会判成 NO HOST */
-			timer = setInterval(() => push(null, Date.now(), true), KEEPALIVE_MS);
+			/* 空闲时也要定期发，否则 ESP 会判成 NO HOST。
+			 * 顺带拿最近一个 ctx 重算一遍统计（比如后台压缩追加的 usage 条目），兜底 */
+			timer = setInterval(() => push(lastCtx, Date.now(), true), KEEPALIVE_MS);
 		}
 		if (drainTimer === null) {
 			/* 持续排空 ESP 的下行：不读会把 tty 缓冲涨满、反向拖死 ESP 的 RX。
@@ -489,7 +549,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (event) => {
 		if (timer !== null) {
 			clearInterval(timer);
 			timer = null;
@@ -497,6 +557,19 @@ export default function (pi: ExtensionAPI) {
 		if (drainTimer !== null) {
 			clearInterval(drainTimer);
 			drainTimer = null;
+		}
+		if (refreshTimer !== null) {
+			clearTimeout(refreshTimer);
+			refreshTimer = null;
+		}
+
+		/* 只有真正退出（reason=quit）才告诉 ESP 断链：这个事件在切换/新建/分叉会话时
+		 * 也会发（reason=new/resume/fork），那几种情况紧接着就 session_start 了，
+		 * 发 bye 只会让屏幕白闪一下。 */
+		if (event.reason === "quit") {
+			link.send('{"cmd":"bye"}', Date.now(), true);
+			await link.shutdown();
+			return;
 		}
 		link.close();
 	});
@@ -512,13 +585,23 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
-		snap.turn += 1;
 		snap.state = "thinking";
 		snap.tps = 0;
 		streamStartedAt = 0;
 		streamChars = 0;
 		msgTokensOut = 0;
 		if (turnStartedAt === 0) turnStartedAt = Date.now();
+		push(ctx, Date.now(), true);
+	});
+
+	pi.on("turn_end", async (_event, ctx) => {
+		/* 到这一步本轮的消息和 tool results 都已经落到 entries 里了
+		 *（agent-session.js:447 附近有明确注释），是重算统计最可靠的时点 */
+		push(ctx, Date.now(), true);
+	});
+
+	/* 压缩会往 entries 里追加一条带 usage 的 compaction 条目 */
+	pi.on("session_compact", async (_event, ctx) => {
 		push(ctx, Date.now(), true);
 	});
 
@@ -589,13 +672,11 @@ export default function (pi: ExtensionAPI) {
 			streamChars = 0;
 
 			if (message.stopReason === "error" || message.errorMessage) snap.state = "error";
-
-			/* 这条消息还没落到 session entries 里（message_end 先于持久化），所以紧接着
-			 * 这一帧的累计值还差它。清掉节流，让后面的 agent_end / tool_execution_*
-			 * 一有机会就重算，别让屏幕上的累计值停在上一条消息上 */
-			lastCtxAt = 0;
 		}
+		/* 统计要等这条落盘之后再算（pi 先跑 handler 再 appendMessage），
+		 * 所以推一帧当前值，另外挂一个延迟补算 */
 		push(ctx, Date.now(), true);
+		scheduleStatsRefresh();
 	});
 
 	pi.on("tool_execution_start", async (_event, ctx) => {
@@ -675,11 +756,11 @@ export default function (pi: ExtensionAPI) {
 				case "test": {
 					/* 不依赖 pi 的运行状态，直接发一段演示数据，方便验证屏幕 */
 					const demo: Array<Record<string, number | string>> = [
-						{ state: "idle", ctx: 8400, ctx_max: 200000, in: 0, out: 0, tps: 0, elapsed: 0, turn: 0 },
-						{ state: "thinking", ctx: 9800, ctx_max: 200000, in: 1200, out: 0, tps: 0, elapsed: 1.2, turn: 1 },
-						{ state: "running", ctx: 15600, ctx_max: 200000, in: 1200, out: 860, tps: 43.5, elapsed: 4.1, turn: 1 },
-						{ state: "tool", ctx: 18200, ctx_max: 200000, in: 1200, out: 1520, tps: 38.2, elapsed: 8.6, turn: 2 },
-						{ state: "done", ctx: 21400, ctx_max: 200000, in: 2400, out: 3100, tps: 46.8, elapsed: 15.4, turn: 3 },
+						{ state: "idle", ctx: 8400, ctx_max: 200000, ctx_pct: 4.2, cache_pct: 96.4, in: 0, out: 0, tps: 0, elapsed: 0 },
+						{ state: "thinking", ctx: 9800, ctx_max: 200000, ctx_pct: 4.9, cache_pct: 97.1, in: 1200, out: 0, tps: 0, elapsed: 1.2 },
+						{ state: "running", ctx: 15600, ctx_max: 200000, ctx_pct: 7.8, cache_pct: 94.9, in: 1200, out: 860, tps: 43.5, elapsed: 4.1 },
+						{ state: "tool", ctx: 18200, ctx_max: 200000, ctx_pct: 9.1, cache_pct: 92.3, in: 1200, out: 1520, tps: 38.2, elapsed: 8.6 },
+						{ state: "done", ctx: 199000, ctx_max: 200000, ctx_pct: 99.5, cache_pct: 100.0, in: 2400, out: 3100, tps: 46.8, elapsed: 15.4 },
 					];
 					for (const item of demo) {
 						const ok = link.send(JSON.stringify(item), Date.now(), true);
@@ -706,7 +787,8 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify(
 						`状态栏：${state}${link.path ? ` ${link.path}` : "（未探测到串口）"}${esp}` +
 							`，本会话 ↑${snap.tokensIn} ↓${snap.tokensOut}` +
-							`，ctx ${lastCtxPct < 0 ? "?" : `${lastCtxPct.toFixed(1)}%`}`,
+							`，ctx ${lastCtxPct < 0 ? "?" : `${lastCtxPct.toFixed(1)}%`}` +
+							`，cache ${snap.cachePct < 0 ? "?" : `${snap.cachePct.toFixed(1)}%`}`,
 						"info",
 					);
 					return;
