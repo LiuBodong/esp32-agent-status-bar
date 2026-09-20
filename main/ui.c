@@ -401,7 +401,7 @@ static void render_page(const agent_status_t *st, uint32_t now_ms)
 
         char elapsed[16];
         fmt_duration(st->elapsed_s, elapsed, sizeof(elapsed));
-        snprintf(sub_text, sizeof(sub_text), "%st/s  %s", speed, elapsed);
+        snprintf(sub_text, sizeof(sub_text), "%s t/s  %s", speed, elapsed);
         set_label_text(s_bot, sub_text);
         break;
     }

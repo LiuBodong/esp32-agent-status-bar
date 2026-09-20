@@ -27,18 +27,22 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 - ESP-IDF **v6.1-dev**。v6 已移除内置的 `json`/cJSON 组件，所以用 `espressif/cjson`
 - LVGL **~9.5.0** + `espressif/esp_lvgl_port ^2.9.0`（这个组合验证过；9.6 太新没用过）
 - Pi 扩展用 Pi 0.85.x 的 Extension API，已用其官方类型做过 `tsc --strict` 校验
+- CodeBuddy 侧没有进程内扩展 API，用 hooks（`SessionStart`/`SessionEnd`）+ 常驻 daemon，
+  协议细节见下面的「CodeBuddy 接入」
 
 ## 目录
 
-| 路径 | 作用 |
-|---|---|
-| `main/display.c` | I2C 总线 + SSD1306 面板 + esp_lvgl_port 初始化 |
-| `main/ui.c` | LVGL 界面：左状态图标 + 右两行文本、2 页轮播、上电自检 |
-| `main/status_model.c` | 状态模型 + cJSON 字段解析（互斥锁保护） |
-| `main/serial_link.c` | USB Serial/JTAG 收发、命令处理、心跳；协议说明在文件头注释 |
-| `main/fonts/` | 副行用的思源黑体 13px ASCII 子集（lv_font_conv 生成） |
-| `tools/mock_status.py` | 不依赖 Pi，直接给屏幕灌模拟数据（PEP 723，`uv run`） |
-| `pi-extension/esp32-status-bar.ts` | Pi 扩展；用 `cp` 装到 `~/.pi/agent/extensions/`，**改完要重新拷并重开会话才生效** |
+| 路径                                 | 作用                                                                                       |
+| ------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `main/display.c`                   | I2C 总线 + SSD1306 面板 + esp_lvgl_port 初始化                                             |
+| `main/ui.c`                        | LVGL 界面：左状态图标 + 右两行文本、2 页轮播、上电自检                                     |
+| `main/status_model.c`              | 状态模型 + cJSON 字段解析（互斥锁保护）                                                    |
+| `main/serial_link.c`               | USB Serial/JTAG 收发、命令处理、心跳；协议说明在文件头注释                                 |
+| `main/fonts/`                      | 副行用的思源黑体 13px ASCII 子集（lv_font_conv 生成）                                      |
+| `tools/mock_status.py`             | 不依赖 Pi，直接给屏幕灌模拟数据（PEP 723，`uv run`）                                     |
+| `tools/cb-status-daemon.py`        | CodeBuddy 侧的常驻 daemon：tail 会话记录 + 状态机 + 独占串口（PEP 723，`uv run`）        |
+| `tools/cb-status-hook.py`          | CodeBuddy hook：只往握手文件写`transcript_path` / 会话结束事件，不碰串口                 |
+| `pi-extension/esp32-status-bar.ts` | Pi 扩展；用`cp` 装到 `~/.pi/agent/extensions/`，**改完要重新拷并重开会话才生效** |
 
 ## 关键约定与坑
 
@@ -70,7 +74,7 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
   现在卡得最紧的是 CTX 页这两处，都是按「最坏取值」算出来的：
   - 主行：最宽文本 `199K/200K` = 69.5px、缓存 `99.9%` = 37.2px → `CTX_MAIN_W=70`
     + `CTX_CACHE_W=38` = 108px 刚好，中间不留间隔（靠字形侧边距分开）。
-    满命中只写 `100%`（`100.0%` 要 44.4px，会撑破右段）
+      满命中只写 `100%`（`100.0%` 要 44.4px，会撑破右段）
   - 副行：进度条 60px + 上下文占比 46px（`100.0%` = 44.4px）
 - TOK 页的 `↑/↓` 口径 = **整个会话累计**，并且和 Pi 底栏一样把 assistant 消息、toolResult
   消息、`type:"usage"` 条目（cache_warm 等）以及 compaction/branch_summary 的 usage 全算进去
@@ -112,6 +116,59 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
   `bad` 计数每个心跳 +1），还会把回显当成主机存活。所以 `mark_rx()` 只在真的带
   主机字段（或 `cmd`）的行上调用。
 
+### CodeBuddy 接入（tail 会话记录）
+
+CodeBuddy **没有 Pi 那样的进程内扩展 API**（插件只能声明 skills/commands/agents/hooks/MCP/LSP），
+hook 又是「一件事 spawn 一个一次性进程」，做不到 Pi 扩展那种 2s 保活 + 100ms 排空串口的循环。
+所以拆成两个进程：**daemon 独占串口**（排空/保活/状态机），**hook 只写一个握手文件**递路径。
+串口始终只有 daemon 碰 —— hook 自己去开 tty 会把 raw 设置和字节流一起搅乱。
+
+- 数据源：`~/.codebuddy/projects/<cwd 斜杠换横线>/<session>.jsonl`。实测**行级即时 flush**
+  （条目落盘延迟 4~60ms，不用等一轮结束）
+- **粒度是「块」不是 token**：块内部文件完全静默 —— 实测一次推理 21.7s 静默、一次 8 秒的工具
+  期间 0 字节。所以 **`thinking` 和 `running` 分不开**（都是一段静默），`running` 这个状态暂时用不上；
+  tps 只能按「一次响应」算平均且滞后一步；纯文本回答期间屏幕上没有任何进度可显示
+- 拿到的：`ctx` = 最后一次响应的 `inputTokens`；`in`/`out` 累计 = **所有带 usage 的条目相加**；
+  `cache_pct` = `cached_tokens / inputTokens`；`model` = `providerData.model`；
+  工具名与工具耗时（`function_call` → `function_call_result`，实测精度 ~30ms）；`done` = `turn-metrics`
+- **usage 挂在「本次模型响应的最后一条条目」上**：响应以工具调用收尾就挂在 `function_call`
+  （并行调用时只有最后一条带），以纯文本收尾就挂在 `message`。所以收集时两种类型都要看，
+  且见一条加一条 —— `conversationRequestId` 是「用户轮」级别的（一个 ID 底下挂过 50 条带 usage
+  的条目），**不能拿来去重**
+- **孤儿调用会钉死状态**：被中断的调用（`function_call` 自带 `status:"incomplete"`，或者干脆没有
+  结果条目）永远等不到 `function_call_result`，只按 callId 配对的话状态会永久停在 `tool`。
+  正确做法是「出现任何新响应的条目（reasoning/message/summary/turn-metrics）就结束工具阶段」
+- `turn-metrics` 带 `source` 字段的是旁支轮次（`background-task`），**不是主轮结束**，要跳过
+- `ctx_max` 不在 transcript 里（只有 ctx），只能 `--ctx-max` / `CB_STATUSBAR_CTX_MAX`；
+  未知时发 0，屏幕显示 `83K/--` + 副行 `--`，不会显示错数字
+- 刻意**不发 `elapsed`**（ESP 自己从状态变化时刻计时，比每 2 秒下一帧顺）和 **`ctx_pct`**
+  （让 ESP 用 `ctx/ctx_max` 自己算，`ui.c:436` 那条兜底路径就是为它写的）
+- hook 侧两条铁律：**绝不能往 stdout 写东西**（`SessionStart` 的 stdout 会被灌进模型上下文，
+  打印个 "ok" 都会污染对话）；`SessionEnd` 的 `reason=clear` **不能发 bye**
+  （紧接着就有新会话，发了屏幕会白闪一下）
+- daemon 启动时读到的是历史状态（上次会话已经 `end` 了），只**采纳**不补发 bye，
+  否则手动启动 daemon 会立刻把屏幕打成 `NO HOST`
+
+安装（和 Pi 扩展一样，仓库里只是源文件，要手动装）：
+
+```bash
+mkdir -p ~/.codebuddy/hooks
+cp tools/cb-status-hook.py ~/.codebuddy/hooks/
+
+```json ~/.codebuddy/settings.json
+{
+"hooks": {
+  "SessionStart": [{ "hooks": [{ "type": "command",
+    "command": "python3 \"$HOME\"/.codebuddy/hooks/cb-status-hook.py" }] }],
+  "SessionEnd":   [{ "hooks": [{ "type": "command",
+    "command": "python3 \"$HOME\"/.codebuddy/hooks/cb-status-hook.py" }] }]
+}
+```
+
+hook 只负责递路径和收工通知，**不负责拉起 daemon**：daemon 由用户手动跑（跑起来才占串口）。
+没装 hook 也能用，daemon 会退化成扫描项目目录里最新的 `.jsonl`，代价是同一个项目开两个会话
+时会挑错文件。
+
 ### 调试
 
 - 上电自检：整屏点亮 400ms（`CONFIG_STATUS_BAR_BOOT_SELFTEST=y`）。看不到 → 查接线/供电，不是字体问题
@@ -119,13 +176,15 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
   会顺带把 tty 设成 raw 并把积压读走，所以**开着 monitor 时现象会消失**，别被它骗了
 - 查链路是否健康：`TIOCINQ` 应该只有几十字节；ESP 心跳里的 `rx`/`bad` 里
   `bad` 不该随时间单调涨（涨 = 有回显污染或半行）
-- **别同时跑 `tools/mock_status.py` 和 Pi 扩展**，两边都在写同一个串口，屏幕会来回跳
+- **别同时跑 `tools/mock_status.py`、`tools/cb-status-daemon.py` 和 Pi 扩展**，几边都在写同一个
+  串口，屏幕会来回跳
 - 排查渲染问题时用 `idf.py size` 看分区余量（CJK 字库占 ~157KB）
 
 ### 代码风格
 
 - C 代码注释写中文，遵循 ESP-IDF 惯用法（`ESP_RETURN_ON_ERROR` / `ESP_ERROR_CHECK`）
 - Pi 扩展注释写中文，保持和 C 端一致的术语（state/ctx/tps 等）
+- `tools/*.py` 注释同样写中文；统一走 PEP 723 头 + `uv run`，改完过一遍 `ruff format`
 
 ## 常用命令（以下都由用户手动执行）
 
@@ -133,6 +192,14 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 idf.py build
 idf.py -p /dev/ttyACM0 flash monitor     # 刷机并看日志
 uv run tools/mock_status.py              # 灌模拟数据（先停掉 Pi 扩展）
+```
+
+CodeBuddy 侧（daemon 和 mock_status 抢同一个串口，别同时跑；也别和 Pi 扩展同时跑）：
+
+```bash
+uv run tools/cb-status-daemon.py --dry-run          # 先不占串口，看要发的帧对不对
+uv run tools/cb-status-daemon.py --ctx-max 200000   # 真机；窗口大小 transcript 里没有，必须给
+uv run tools/cb-status-daemon.py --replay -t <会话.jsonl>   # 离线快放，验证状态机
 ```
 
 Pi 交互里：`/statusbar`（看连接状态）、`/statusbar test`（发演示数据）、`/statusbar port <设备>`、`/statusbar on|off`
