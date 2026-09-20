@@ -30,6 +30,7 @@ typedef struct {
     char     state_name[AGENT_STATE_NAME_MAX]; /* 已转大写，host 未识别的名字原样保留 */
     uint32_t ctx_used;                          /* 上下文已用 token */
     uint32_t ctx_max;                           /* 上下文窗口大小，0 = 未知 */
+    float    ctx_pct;                           /* 上下文占用百分比，<0 = 未知（由 host 直接给） */
     uint32_t tok_in;                            /* 最近一次请求输入 token */
     uint32_t tok_out;                           /* 最近一次回复输出 token */
     float    tps;                               /* token/s，<0 表示未知 */

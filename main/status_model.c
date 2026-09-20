@@ -5,6 +5,10 @@
  *   state     : "idle"|"thinking"|"running"|"tool"|"waiting"|"done"|"error"（也接受任意自定义字符串）
  *   ctx       : 上下文已用 token            别名 ctx_used/context/context_tokens
  *   ctx_max   : 上下文窗口                  别名 ctx_limit/ctx_size/ctx_window/context_max
+ *   ctx_pct   : 上下文占用百分比（0.1 精度） 别名 ctx_percent/context_pct/context_percent
+ *               由 host 直接下发它自己显示的那个数，省得两边各算一遍算不到一起；
+ *               负数表示未知（例如刚压缩完还没新回复），UI 会显示 "--"。
+ *               没给时才退回用 ctx/ctx_max 自己算
  *   in        : 输入 token                  别名 in_tokens/input/input_tokens/tokens_in
  *   out       : 输出 token                  别名 out_tokens/output/output_tokens/tokens_out
  *   tps       : token/s                     别名 tok_s/tokens_per_second
@@ -147,6 +151,13 @@ static bool get_ctx_max(const cJSON *o, double *out)
     return json_num_any(o, keys, NUM_KEYS(keys), out);
 }
 
+static bool get_ctx_pct(const cJSON *o, double *out)
+{
+    /* host 直接给百分比（它自己显示的那个数），避免两边各算一遍算不到一起 */
+    static const char *const keys[] = { "ctx_pct", "ctx_percent", "context_pct", "context_percent" };
+    return json_num_any(o, keys, NUM_KEYS(keys), out);
+}
+
 static bool get_tok_in(const cJSON *o, double *out)
 {
     static const char *const keys[] = { "in", "in_tokens", "input", "input_tokens", "tokens_in", "prompt_tokens" };
@@ -210,6 +221,7 @@ void status_model_init(void)
 
     memset(&s_m, 0, sizeof(s_m));
     s_m.st.tps = -1.0f;
+    s_m.st.ctx_pct = -1.0f;
     s_m.st.state = AGENT_STATE_UNKNOWN;
     copy_str(s_m.st.state_name, "UNKNOWN", sizeof(s_m.st.state_name));
     s_m.host_elapsed_s = -1.0f;
@@ -239,6 +251,7 @@ void status_model_reset(void)
 
     memset(&s_m.st, 0, sizeof(s_m.st));
     s_m.st.tps = -1.0f;
+    s_m.st.ctx_pct = -1.0f;
     s_m.st.host_seen = seen;
     s_m.st.rev = rev;
     copy_str(s_m.st.state_name, "UNKNOWN", sizeof(s_m.st.state_name));
@@ -267,6 +280,7 @@ bool status_model_apply_json(const cJSON *obj)
 
     if (get_ctx_used(obj, &v))  { s_m.st.ctx_used = to_u32(v); touched = true; }
     if (get_ctx_max(obj, &v))   { s_m.st.ctx_max  = to_u32(v); touched = true; }
+    if (get_ctx_pct(obj, &v))   { s_m.st.ctx_pct  = (float)v;  touched = true; }
     if (get_tok_in(obj, &v))    { s_m.st.tok_in   = to_u32(v); touched = true; }
     if (get_tok_out(obj, &v))   { s_m.st.tok_out  = to_u32(v); touched = true; }
     if (get_tps(obj, &v))       { s_m.st.tps      = (float)v;  touched = true; }

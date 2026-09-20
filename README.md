@@ -85,7 +85,7 @@ uv run tools/mock_status.py --send '{"state":"error","tps":0}'
 ### 状态上报（host → ESP32）
 
 ```json
-{"state":"thinking","ctx":12000,"ctx_max":200000,"in":1234,"out":567,"tps":42.5,"elapsed":3.2,"turn":2}
+{"state":"thinking","ctx":12000,"ctx_max":200000,"ctx_pct":6.0,"in":1234,"out":567,"tps":42.5,"elapsed":3.2,"turn":2}
 ```
 
 | 字段 | 含义 | 别名 |
@@ -93,6 +93,7 @@ uv run tools/mock_status.py --send '{"state":"error","tps":0}'
 | `state` | `idle` `thinking` `running` `tool` `waiting` `done` `error`，也接受任意自定义字符串 | `status` |
 | `ctx` | 上下文已用 token | `ctx_used` `context` `context_tokens` `context_used` |
 | `ctx_max` | 上下文窗口 | `ctx_limit` `ctx_size` `ctx_window` `context_max` … |
+| `ctx_pct` | 上下文占用百分比（保留 1 位小数，屏幕直接显示这个数），**负数 = 未知** | `ctx_percent` `context_pct` `context_percent` |
 | `in` | 累计输入 token | `in_tokens` `input` `input_tokens` `tokens_in` `prompt_tokens` |
 | `out` | 累计输出 token | `out_tokens` `output` `output_tokens` `tokens_out` `completion_tokens` |
 | `tps` | token/s | `tok_s` `tokens_per_second` `speed` |
@@ -101,6 +102,11 @@ uv run tools/mock_status.py --send '{"state":"error","tps":0}'
 
 没有 `state` 里的标准值时显示原始字符串（过滤成可打印的大写 ASCII）。
 数值写成字符串也能解析。
+
+`ctx_pct` 是**为了两个屏幕对得上**才单独下发的：主机自己算好它显示的那个百分比
+（Pi 扩展取 `getContextUsage().percent` 的 `toFixed(1)`）直接给过来，ESP 不再拿
+`ctx/ctx_max` 重算 —— 一边是 JS 按 double 舍入、一边是整数/F 运算，总会差一档。
+主机没给这个字段时才退回自己算（`tools/mock_status.py` 就是这种）。
 
 ### 控制命令（host → ESP32）
 

@@ -59,6 +59,18 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
     这样才显示得成 `200K` / `1M`
   - TOK 页：`↑ 1.2k ↓ 567`。箭头是 montserrat 符号、数字是思源黑体，**同一行混不了两种字体**，
     所以塞进一个 flex 容器（`s_tok_row`）各占一个定宽 label
+- `fmt_count()` 的分段和取整必须和 Pi 底栏 `formatTokens()`（`footer.js`）**逐条对齐**：
+  `<1000` 原样 / `<10k` 一位小数 / `<1M` 四舍五入到 k / `<10M` 一位小数 M / 其余四舍五入到 M。
+  改任一边都要同步，否则会出现「屏幕 29k、底栏 30k」这种对不上的情况
+- 上下文百分比**由主机下发**（`ctx_pct`，1 位小数，负数 = 未知 → 显示 `--`），ESP 不重算。
+  JS 那边是 `percent.toFixed(1)`（按 double 舍入），一边整数一边浮点必然在某些值上差一档
+  （例：300/200000 精确等于 0.15%，JS 的 double 是 0.14999… → `0.1%`，精确十进制会给 `0.2%`）。
+  只有主机没给 `ctx_pct` 时才退回用 `ctx/ctx_max` 自己算（`tools/mock_status.py` 走这条）
+- CTX 页副行要放 `100.0%`，最宽 4*7.1875 + 3.625(.) + 12(%) = 44.4px，所以进度条只占 60px
+  （`BAR_W=60` → `PCT_X=82`、`PCT_W=46`）。改宽度前先按 `.adv_w/16` 算一遍
+- TOK 页的 `↑/↓` 口径 = **整个会话累计**，并且和 Pi 底栏一样把 assistant 消息、toolResult
+  消息、`type:"usage"` 条目（cache_warm 等）以及 compaction/branch_summary 的 usage 全算进去
+  （Pi 扩展里的 `collectUsageTotals()`）。**不要改成「本轮累计」** —— 那是自造口径，只会和底栏打架
 - 状态改用图标表示：`lv_font_montserrat_14` 里带全套 FontAwesome 符号（`LV_SYMBOL_PLAY` 等），
   映射见 `ui.c:state_symbol()`；`thinking` 用 `lv_arc` 画的 90° 弧逐档旋转。
   **不要用 LVGL 内置 montserrat 排正文**：它的字形墨迹常宽于 advance（负边距），小字号会挤在一起；

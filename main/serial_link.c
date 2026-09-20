@@ -5,8 +5,10 @@
  * 只有以 '{' 开头的行才会被解析，其它内容（比如日志回显）会被忽略。
  *
  * 状态字段（host -> ESP，全部可选，字段别名见 status_model.c）：
- *   {"state":"thinking","ctx":12000,"ctx_max":200000,
+ *   {"state":"thinking","ctx":12000,"ctx_max":200000,"ctx_pct":6.0,
  *    "in":1234,"out":567,"tps":42.5,"elapsed":3.2,"turn":2}
+ *   ctx_pct 由 host 直接给（它自己显示的那个百分比，1 位小数；负数 = 未知），
+ *   免得两边各算一遍算不到一起。
  *
  * 控制命令（host -> ESP）：
  *   {"cmd":"ping"}                         -> {"evt":"pong",...}

@@ -98,13 +98,15 @@ extern const lv_font_t lv_font_source_han_sans_cn_13_ascii;
 #define TOK_VAL_W   34
 #define TOK_GAP     3    /* 合计 14+3+34+3+14+3+34 = 105px，右列放得下 */
 
-/* 进度条 + 百分比，一起铺满右列副行 */
+/* 进度条 + 百分比，一起铺满右列副行。
+ * 百分比要显示到 0.1%（和 Pi 底栏一致），最宽是 "100.0%" = 4*7.1875 + 3.625 + 12 = 44.4px，
+ * 所以进度条让到 60px，给百分比留 46px（BAR_X=20, BAR_W=60, PCT_X=82, PCT_W=46） */
 #define BAR_X      COL_X
 #define BAR_Y      18
-#define BAR_W      68
+#define BAR_W      60
 #define BAR_H      12
-#define PCT_X      (COL_X + BAR_W + 2)    /* 90 */
-#define PCT_W      (SCREEN_W - PCT_X)     /* 38 */
+#define PCT_X      (COL_X + BAR_W + 2)    /* 82 */
+#define PCT_W      (SCREEN_W - PCT_X)     /* 46 */
 
 static lv_obj_t *s_icon;        /* 状态图标（符号字形） */
 static lv_obj_t *s_spin;        /* thinking 专用的旋转弧 */
@@ -153,19 +155,35 @@ static void fmt_ctx(uint32_t value, bool known, char *out, size_t out_size)
     }
 }
 
-/** 大数值压缩显示：999 / 1.2k / 12k / 999k / 1.2M（最长 4 字符，保证 TOK 页放得下） */
+/** 大数值压缩显示：999 / 1.2k / 29k / 999k / 1.2M（最长 4 字符，保证 TOK 页放得下）
+ *
+ * 分段和取整方式必须和 Pi 底栏的 formatTokens() 逐条对齐，否则屏幕和 pi 底栏
+ * 会出现「29k vs 30k」这种对不上的情况（pi 在 10k~1M 档是四舍五入，不是截断）。
+ *
+ * 一位小数的两档用整数运算算「四舍五入到 0.1」，别写 %.1f：printf 是按二进制值
+ * 舍入的，1.15 会出 1.1，而 JS 的 toFixed(1) 给 1.2。
+ */
 static void fmt_count(uint32_t value, bool known, char *out, size_t out_size)
 {
     if (!known) {
         snprintf(out, out_size, "--");
-    } else if (value < 1000) {
+    } else if (value < 1000u) {
         snprintf(out, out_size, "%u", (unsigned)value);
-    } else if (value < 10000) {
-        snprintf(out, out_size, "%.1fk", (double)value / 1000.0);
-    } else if (value < 1000000) {
-        snprintf(out, out_size, "%uk", (unsigned)(value / 1000));
+    } else if (value < 10000u) {
+        unsigned tenths = (unsigned)((value * 10u + 500u) / 1000u);
+        snprintf(out, out_size, "%u.%uk", tenths / 10u, tenths % 10u);
+    } else if (value < 1000000u) {
+        snprintf(out, out_size, "%uk", (unsigned)((value + 500u) / 1000u));
+    } else if (value < 10000000u) {
+        unsigned tenths = (unsigned)((value * 10u + 500000u) / 1000000u);
+        snprintf(out, out_size, "%u.%uM", tenths / 10u, tenths % 10u);
     } else {
-        snprintf(out, out_size, "%.1fM", (double)value / 1000000.0);
+        /* 整数四舍五入；别写成 (value + 500000u) / 1000000u，u32 上限附近会溢出 */
+        unsigned m = (unsigned)(value / 1000000u);
+        if (value % 1000000u >= 500000u) {
+            m++;
+        }
+        snprintf(out, out_size, "%uM", m);
     }
 }
 
@@ -365,17 +383,25 @@ static void render_page(const agent_status_t *st, uint32_t now_ms)
         }
         set_label_text(s_top, main_text);
 
-        uint32_t pct = 0;
-        if (pct_known) {
+        /* 百分比优先用 host 直接给的那个数（= 它底栏显示的值，0.1 精度），
+         * 主机没给（例如 tools/mock_status.py）才退回用 ctx/ctx_max 自己算。
+         * 自己算只保证「合理」，做不到和别的工具一位不差（JS 那边是按 double 的
+         * toFixed(1) 舍入的，精确十进制四舍五入在 0.15% 这种值上会差一档）。 */
+        float pct = st->ctx_pct;
+        if (pct < 0.0f && pct_known) {
             uint32_t clamped = st->ctx_used > st->ctx_max ? st->ctx_max : st->ctx_used;
-            pct = (clamped * 100u) / st->ctx_max;
+            pct = (float)((double)clamped * 100.0 / (double)st->ctx_max);
         }
-        lv_bar_set_value(s_bar, (int32_t)pct, LV_ANIM_OFF);
 
-        if (pct_known) {
-            snprintf(sub_text, sizeof(sub_text), "%u%%", (unsigned)pct);
-        } else {
+        if (pct < 0.0f) {
+            lv_bar_set_value(s_bar, 0, LV_ANIM_OFF);
             snprintf(sub_text, sizeof(sub_text), "--");
+        } else {
+            if (pct > 999.9f) {
+                pct = 999.9f;   /* 兜一下脏数据，免得 int32 转换和标签宽度失控 */
+            }
+            lv_bar_set_value(s_bar, (int32_t)(pct > 100.0f ? 100.0f : pct + 0.5f), LV_ANIM_OFF);
+            snprintf(sub_text, sizeof(sub_text), "%.1f%%", (double)pct);
         }
         set_label_text(s_bot, sub_text);
         break;

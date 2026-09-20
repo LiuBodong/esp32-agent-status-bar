@@ -51,13 +51,21 @@ interface Snapshot {
 	state: AgentState;
 	ctxUsed: number;
 	ctxMax: number;
-	/** 本轮累计输入 token（屏幕上显示 IN） */
+	/** 本会话累计输入 token（屏幕上显示 IN/上行） */
 	tokensIn: number;
-	/** 本轮累计输出 token（屏幕上显示 OUT） */
+	/** 本会话累计输出 token（屏幕上显示 OUT/下行） */
 	tokensOut: number;
 	tps: number;
 	turn: number;
 	model: string | null;
+}
+
+/** 与 pi 底栏同口径的 token 累计值（不是「本轮」，见 collectUsageTotals 注释） */
+interface UsageTotals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
 }
 
 /* ------------------------------ 串口 ------------------------------ */
@@ -321,14 +329,14 @@ export default function (pi: ExtensionAPI) {
 	let runElapsed = 0; // 一轮结束后的定格耗时（秒）
 	let streamStartedAt = 0; // 当前 assistant 消息开始流式输出的时间
 	let streamChars = 0; // 流式收到的字符数（用于估算 token）
-	let runTokensIn = 0; // 本轮累计输入 token
-	let runTokensOut = 0; // 本轮累计输出 token
-	let msgTokensIn = 0; // 当前 assistant 消息的输入 token
-	let msgTokensOut = 0; // 当前 assistant 消息的输出 token
+	let msgTokensOut = 0; // 当前 assistant 消息的输出 token（只用于算 tps）
 	let doneUntil = 0; // DONE 状态至少保持到什么时候
 	let lastCtxAt = 0;
 	let lastCtxUsed = 0;
 	let lastCtxMax = 0;
+	/** 上下文占用百分比，-1 = 未知（pi 底栏此时显示 ?）。直接下发底栏那个数，
+	 * 别让 ESP 拿 ctx/ctx_max 自己算 —— 两边的舍入规则凑不到一位不差 */
+	let lastCtxPct = -1;
 	let timer: ReturnType<typeof setInterval> | null = null;
 	let drainTimer: ReturnType<typeof setInterval> | null = null;
 	let notifiedMissing = false;
@@ -351,6 +359,7 @@ export default function (pi: ExtensionAPI) {
 			state,
 			ctx: Math.round(lastCtxUsed),
 			ctx_max: Math.round(lastCtxMax),
+			ctx_pct: lastCtxPct,
 			in: Math.round(snap.tokensIn),
 			out: Math.round(snap.tokensOut),
 			tps: Math.round(snap.tps * 10) / 10,
@@ -359,6 +368,35 @@ export default function (pi: ExtensionAPI) {
 		};
 		if (snap.model) payload.model = snap.model;
 		return JSON.stringify(payload);
+	}
+
+	/**
+	 * 按 pi 底栏（footer.js）的口径统计**整个会话**的 token：
+	 * 遍历 session entries，累加 assistant 消息、toolResult 消息、type:"usage" 条目
+	 * （如 cache_warm）以及 compaction / branch_summary 的 usage。
+	 *
+	 * 必须和底栏一致，否则屏幕和 pi 底栏的数字对不上。注意这**不是**「本轮」的量：
+	 * 本轮量在屏幕上没有对应物，硬算出来只会和底栏打架。
+	 */
+	function collectUsageTotals(ctx: ExtensionContext): UsageTotals {
+		const totals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		for (const entry of ctx.sessionManager.getEntries()) {
+			let usage;
+			if (entry.type === "usage") {
+				usage = entry.usage;
+			} else if (entry.type === "message") {
+				if (entry.message.role === "assistant") usage = entry.message.usage;
+				else if (entry.message.role === "toolResult") usage = entry.message.usage;
+			} else if (entry.type === "compaction" || entry.type === "branch_summary") {
+				usage = entry.usage;
+			}
+			if (!usage) continue;
+			totals.input += usage.input;
+			totals.output += usage.output;
+			totals.cacheRead += usage.cacheRead;
+			totals.cacheWrite += usage.cacheWrite;
+		}
+		return totals;
 	}
 
 	function refreshContextUsage(ctx: ExtensionContext | null, now: number): void {
@@ -374,8 +412,20 @@ export default function (pi: ExtensionAPI) {
 				/* 有些 provider 只给百分比 */
 				lastCtxUsed = Math.round((usage.percent / 100) * lastCtxMax);
 			}
+			/* 百分比直接取 pi 底栏用的那个数（同一次 getContextUsage() 调用），
+			 * 保留一位小数后原样下发，屏幕就能和底栏一位不差。
+			 * percent 为 null 表示刚压缩完、要等下一次模型回复才知道，下发 -1 让屏幕显示 -- */
+			lastCtxPct = typeof usage?.percent === "number" ? Number(usage.percent.toFixed(1)) : -1;
 		} catch {
 			/* 取不到就沿用上次的值 */
+		}
+
+		try {
+			const totals = collectUsageTotals(ctx);
+			snap.tokensIn = totals.input;
+			snap.tokensOut = totals.output;
+		} catch {
+			/* 同上，取不到就沿用上次的值 */
 		}
 	}
 
@@ -394,17 +444,13 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	/** 只重置「本轮」的量；tokensIn/Out 是整个会话的累计值，由 refreshContextUsage 维护 */
 	function resetRun(): void {
-		snap.tokensIn = 0;
-		snap.tokensOut = 0;
 		snap.tps = 0;
 		snap.turn = 0;
 		runElapsed = 0;
 		streamStartedAt = 0;
 		streamChars = 0;
-		runTokensIn = 0;
-		runTokensOut = 0;
-		msgTokensIn = 0;
 		msgTokensOut = 0;
 	}
 
@@ -418,6 +464,7 @@ export default function (pi: ExtensionAPI) {
 		doneUntil = 0;
 		lastCtxAt = 0;
 		lastCtxUsed = 0; // 新会话，上下文占用重新算
+		lastCtxPct = -1;
 		notifiedMissing = false;
 
 		push(ctx, Date.now(), true);
@@ -470,7 +517,6 @@ export default function (pi: ExtensionAPI) {
 		snap.tps = 0;
 		streamStartedAt = 0;
 		streamChars = 0;
-		msgTokensIn = 0;
 		msgTokensOut = 0;
 		if (turnStartedAt === 0) turnStartedAt = Date.now();
 		push(ctx, Date.now(), true);
@@ -480,10 +526,10 @@ export default function (pi: ExtensionAPI) {
 		const now = Date.now();
 		const streamed = event.message;
 		const usage = streamed?.role === "assistant" ? streamed.usage : undefined;
-		if (usage) {
-			/* 流式期间 provider 报的是当前这条消息的累计用量 */
-			if (usage.input) msgTokensIn = usage.input;
-			if (usage.output) msgTokensOut = usage.output;
+		if (usage?.output) {
+			/* 流式期间 provider 报的是当前这条消息的累计用量；只拿来算 tps，
+			 * 累计 token 一律走 session entries（见 collectUsageTotals） */
+			msgTokensOut = usage.output;
 		}
 
 		const ev = event.assistantMessageEvent;
@@ -527,34 +573,27 @@ export default function (pi: ExtensionAPI) {
 			if (seconds > 0.3) snap.tps = estimatedOut / seconds;
 		}
 
-		/* 累计值 = 前面已结束的消息 + 当前这条 */
-		snap.tokensIn = runTokensIn + msgTokensIn;
-		snap.tokensOut = runTokensOut + estimatedOut;
-
 		push(ctx, now);
 	});
 
 	pi.on("message_end", async (event, ctx) => {
 		const message = event.message;
 		if (message?.role === "assistant") {
-			const usage = message.usage;
-			const input = usage?.input ?? msgTokensIn;
-			const output = usage?.output ?? msgTokensOut;
-
-			runTokensIn += input;
-			runTokensOut += output;
-			msgTokensIn = 0;
-			msgTokensOut = 0;
-			snap.tokensIn = runTokensIn;
-			snap.tokensOut = runTokensOut;
+			const output = message.usage?.output ?? msgTokensOut;
 
 			const seconds = streamStartedAt > 0 ? (Date.now() - streamStartedAt) / 1000 : 0;
 			if (seconds > 0.3 && output > 0) snap.tps = output / seconds;
 
+			msgTokensOut = 0;
 			streamStartedAt = 0;
 			streamChars = 0;
 
 			if (message.stopReason === "error" || message.errorMessage) snap.state = "error";
+
+			/* 这条消息还没落到 session entries 里（message_end 先于持久化），所以紧接着
+			 * 这一帧的累计值还差它。清掉节流，让后面的 agent_end / tool_execution_*
+			 * 一有机会就重算，别让屏幕上的累计值停在上一条消息上 */
+			lastCtxAt = 0;
 		}
 		push(ctx, Date.now(), true);
 	});
@@ -665,7 +704,9 @@ export default function (pi: ExtensionAPI) {
 						esp = `，ESP 心跳 ${stats.hbs} 次 / up ${stats.upSec}s / ${age}s 前有下行，rx=${stats.rx} bad=${stats.bad}`;
 					}
 					ctx.ui.notify(
-						`状态栏：${state}${link.path ? ` ${link.path}` : "（未探测到串口）"}${esp}`,
+						`状态栏：${state}${link.path ? ` ${link.path}` : "（未探测到串口）"}${esp}` +
+							`，本会话 ↑${snap.tokensIn} ↓${snap.tokensOut}` +
+							`，ctx ${lastCtxPct < 0 ? "?" : `${lastCtxPct.toFixed(1)}%`}`,
 						"info",
 					);
 					return;
