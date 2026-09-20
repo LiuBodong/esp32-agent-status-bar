@@ -3,6 +3,16 @@
 ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：Pi（终端编码 agent）
 通过 USB Serial/JTAG 把运行状态实时推给 ESP32，屏幕轮播展示。
 
+## 构建与烧录：必须由用户手动执行
+
+- **不要自动跑 `idf.py build` / `idf.py flash` / `idf.py monitor`，也不要放后台跑**。
+  改完代码就停下、汇报改动，编译和烧录由用户自己决定什么时候做。
+- 不要为了「验证一下能不能编过」而擅自构建：编译失败、占满 CPU、重刷设备都由用户承担。
+  需要编译期确认时，在回复里说明该跑什么命令，等用户自己跑。
+- 静态检查（如 `tsc --strict` 校验 Pi 扩展）不属于构建，可以照常做。
+- 改完 `pi-extension/esp32-status-bar.ts` 只是改了仓库里的源文件，用户要自己 `cp` 到
+  `~/.pi/agent/extensions/` 并重开会话才生效。
+
 ## 硬件
 
 - 芯片：ESP32-C3，2MB flash（单 app 分区 1MB，目前固件约占 78%）
@@ -28,7 +38,7 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 | `main/serial_link.c` | USB Serial/JTAG 收发、命令处理、心跳；协议说明在文件头注释 |
 | `main/fonts/` | 副行用的思源黑体 13px ASCII 子集（lv_font_conv 生成） |
 | `tools/mock_status.py` | 不依赖 Pi，直接给屏幕灌模拟数据（PEP 723，`uv run`） |
-| `pi-extension/esp32-status-bar.ts` | Pi 扩展；已软链到 `~/.pi/agent/extensions/` |
+| `pi-extension/esp32-status-bar.ts` | Pi 扩展；用 `cp` 装到 `~/.pi/agent/extensions/`，**改完要重新拷并重开会话才生效** |
 
 ## 关键约定与坑
 
@@ -67,12 +77,23 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 
 - `state`：`idle|thinking|running|tool|waiting|done|error`，也接受任意自定义字符串
 - 字段别名、命令（`ping`/`page`/`clear`）与下行事件（`boot`/`hb`/`pong`）见 `main/serial_link.c` 头部注释
-- ESP 每 10s 发一次心跳；5s 收不到 host 数据就显示 `NO HOST`
+- ESP 每 10s 发一次心跳；10s 收不到 host 数据就显示 `NO HOST`
+  （`STATUS_BAR_LINK_TIMEOUT_MS`，要 ≥ 主机保活间隔的 3 倍）
+- **主机侧必须「双工 + raw」**：用 `O_RDWR` 打开串口并持续排空下行，且把 tty 设成
+  `raw`（关 icanon/echo/ixon）。只写不读会让 host 的 tty 输入队列（canonical 上限 4KB）
+  涨满 → USB IN 方向没人消费 → ESP 的 TX 环（512B）堵死 → 主机自己的写也跟着失败，
+  表现就是 **agent 明明连着却偶现 `NO HOST`**（`TIOCINQ` 顶在 3920/4096 钉死不降）。
+  没关 ECHO 更糟：ESP 会收到自己下行的回显，和真数据按字节粘成半行（
+  `bad` 计数每个心跳 +1），还会把回显当成主机存活。所以 `mark_rx()` 只在真的带
+  主机字段（或 `cmd`）的行上调用。
 
 ### 调试
 
 - 上电自检：整屏点亮 400ms（`CONFIG_STATUS_BAR_BOOT_SELFTEST=y`）。看不到 → 查接线/供电，不是字体问题
-- `idf.py monitor` 常驻占用串口不影响 Pi 扩展（它只读、扩展只写）
+- `idf.py monitor` 常驻占用串口不影响 Pi 扩展（它只读、扩展只写）。但要注意 monitor
+  会顺带把 tty 设成 raw 并把积压读走，所以**开着 monitor 时现象会消失**，别被它骗了
+- 查链路是否健康：`TIOCINQ` 应该只有几十字节；ESP 心跳里的 `rx`/`bad` 里
+  `bad` 不该随时间单调涨（涨 = 有回显污染或半行）
 - **别同时跑 `tools/mock_status.py` 和 Pi 扩展**，两边都在写同一个串口，屏幕会来回跳
 - 排查渲染问题时用 `idf.py size` 看分区余量（CJK 字库占 ~157KB）
 
@@ -81,7 +102,7 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 - C 代码注释写中文，遵循 ESP-IDF 惯用法（`ESP_RETURN_ON_ERROR` / `ESP_ERROR_CHECK`）
 - Pi 扩展注释写中文，保持和 C 端一致的术语（state/ctx/tps 等）
 
-## 常用命令
+## 常用命令（以下都由用户手动执行）
 
 ```bash
 idf.py build

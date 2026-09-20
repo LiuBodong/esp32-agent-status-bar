@@ -19,3 +19,7 @@ CONFIG_LV_FONT_MONTSERRAT_14=y
 # 日志走 UART0；USB Serial/JTAG 只注册 VFS 供本程序收发数据
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+
+# ------------------------- 链路 -------------------------
+# 要 ≥ 主机保活间隔（Pi 扩展 2s）的 3 倍：主机偶尔漏一帧不该闪 NO HOST
+CONFIG_STATUS_BAR_LINK_TIMEOUT_MS=10000

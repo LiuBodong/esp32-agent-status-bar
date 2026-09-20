@@ -14,16 +14,30 @@
  *   2. 环境变量 PI_STATUSBAR_PORT=/dev/ttyACM0
  *   3. 自动探测 /dev/ttyACM* 然后 /dev/ttyUSB*
  *
+ * 串口必须是「双工 + raw」：
+ *   - ESP 每 10s 会下行心跳，boot/pong/ack 也都是下行。如果只写不读，这些数据会把
+ *     host 的 tty 输入队列（canonical 上限 4KB）涨满，USB IN 方向就没人消费了；
+ *     ESP 的 TX 环（512B）跟着堵死，而它的心跳发送又在 RX 任务里，连 RX 一起拖死 ——
+ *     表现出来就是 agent 明明连着，屏幕却偶现 NO HOST。所以这里持续排空。
+ *   - tty 默认是 icanon/echo/ixon，ECHO 会把 ESP 自己的输出回灌进它自己的 RX，
+ *     和主机的真数据按字节交错粘成半行，ESP 解析失败并把回显当成主机存活。
+ *     所以打开后立刻 stty raw（Node 没有 tcsetattr，只能借系统命令）。
+ *
  * 运行中可用 /statusbar 命令查看状态、换端口、临时关闭或发测试数据。
  */
 
-import { closeSync, constants, openSync, readdirSync, writeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { closeSync, constants, openSync, readSync, readdirSync, writeSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** 最快写串口间隔，避免流式输出时把串口打满 */
 const WRITE_MIN_INTERVAL_MS = 200;
-/** 空闲时的保活间隔；要小于 ESP 端 CONFIG_STATUS_BAR_LINK_TIMEOUT_MS(5s) */
-const KEEPALIVE_MS = 3000;
+/** 排空串口的间隔；不排空会反向把 ESP 的 RX 拖死（见文件头注释） */
+const DRAIN_MS = 100;
+/** 空闲时的保活间隔；要明显小于 ESP 端 CONFIG_STATUS_BAR_LINK_TIMEOUT_MS */
+const KEEPALIVE_MS = 2000;
+/** 待发送缓冲上限：超了说明对端长时间收不动，整块丢弃重来，免得无限膨胀 */
+const PENDING_MAX = 4096;
 /** 串口打不开（拔掉了 / 还没插）时的重试间隔 */
 const RECONNECT_MS = 5000;
 /** 上下文用量的刷新间隔：getContextUsage() 会做估算，不要每帧都调 */
@@ -62,12 +76,32 @@ function detectPort(): string | null {
 	return null;
 }
 
+/** ESP 侧心跳里带上来的自检数据，用来在 /statusbar 里判断链路是否真的健康 */
+interface EspStats {
+	/** 收到心跳包的数量 */
+	hbs: number;
+	/** 最近一次心跳的 ESP 运行时长（秒） */
+	upSec: number;
+	/** ESP 累计解析成功 / 失败的主机行数 */
+	rx: number;
+	bad: number;
+}
+
 class SerialLink {
 	private fd: number | null = null;
 	private port: string | null;
 	private retryAfter = 0;
 	private lastWriteAt = 0;
 	private enabled = true;
+
+	/** 待发送的字节；写不进去时留着下次补，保证不把 JSON 行截成半行 */
+	private pending: Buffer = Buffer.alloc(0);
+	/** 下行拆行用的残留 */
+	private rxTail = "";
+	private readonly rxChunk = Buffer.alloc(4096);
+	private rawModeWarned = false;
+	private lastRxAt = 0;
+	private stats: EspStats | null = null;
 
 	constructor(port: string | null) {
 		this.port = port;
@@ -83,6 +117,15 @@ class SerialLink {
 
 	get active(): boolean {
 		return this.enabled;
+	}
+
+	/** ESP 最近一次下行的时间（0 = 从没收到过） */
+	get lastRxMs(): number {
+		return this.lastRxAt;
+	}
+
+	get espStats(): EspStats | null {
+		return this.stats;
 	}
 
 	usePort(port: string | null): void {
@@ -107,9 +150,13 @@ class SerialLink {
 		}
 
 		try {
-			/* O_NONBLOCK：串口写满时立刻返回 EAGAIN，绝不阻塞 pi 的主线程 */
-			this.fd = openSync(port, constants.O_WRONLY | constants.O_NONBLOCK);
+			/* O_RDWR：必须能读，ESP 的下行不排空会把链路堵死（见文件头注释）。
+			 * O_NONBLOCK：串口写满时立刻返回 EAGAIN，绝不阻塞 pi 的主线程 */
+			this.fd = openSync(port, constants.O_RDWR | constants.O_NONBLOCK);
 			this.port = port;
+			this.rxTail = "";
+			this.pending = Buffer.alloc(0);
+			this.applyRawMode(port);
 			return this.fd;
 		} catch {
 			this.fd = null;
@@ -118,7 +165,102 @@ class SerialLink {
 		}
 	}
 
-	/** 发送一行；force=true 时忽略节流。返回是否真的写出去了 */
+	/** 关掉 tty 的 icanon/echo/ixon，见文件头注释；没有 stty（如 Windows）就跳过 */
+	private applyRawMode(port: string): void {
+		const args = process.platform === "darwin" ? ["-f", port, "raw"] : ["-F", port, "raw"];
+		const result = spawnSync("stty", args, { stdio: "ignore" });
+		if ((result.error || result.status !== 0) && !this.rawModeWarned) {
+			this.rawModeWarned = true;
+			/* 没有 stty 也还能用：ESP 侧只把「带主机字段的行」算作主机存活，
+			 * 不会把回显当成主机。这里只提醒一声，不打断发送。 */
+			console.error(`[statusbar] stty raw ${port} 失败，串口回显可能污染协议流`);
+		}
+	}
+
+	/**
+	 * 把 ESP 的下行读干净。除了防止 tty 缓冲涨满，顺便解析 boot/hb/pong/ack，
+	 * 这样 /statusbar 能看到对端是否真的活着。
+	 */
+	drain(now = Date.now()): void {
+		const fd = this.fd;
+		if (fd === null) return;
+
+		for (;;) {
+			let n: number;
+			try {
+				n = readSync(fd, this.rxChunk, 0, this.rxChunk.length, null);
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException)?.code;
+				if (code === "EAGAIN" || code === "EWOULDBLOCK" || code === "EINTR") break;
+				this.close();
+				this.retryAfter = now + RECONNECT_MS;
+				return;
+			}
+			if (n <= 0) break;
+			this.consume(this.rxChunk.subarray(0, n), now);
+		}
+
+		this.flush(now);
+	}
+
+	private consume(chunk: Buffer, now: number): void {
+		this.lastRxAt = now;
+		const text = this.rxTail + chunk.toString("utf8");
+		const lines = text.split("\n");
+		this.rxTail = lines.pop() ?? ""; // 最后一段可能是半行，留到下次
+
+		for (const raw of lines) {
+			const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+			if (!line.startsWith("{")) continue; // ESP 日志/别的杂音
+			try {
+				const evt = JSON.parse(line) as Record<string, unknown>;
+				if (typeof evt.evt !== "string") continue;
+				if (evt.evt === "hb") {
+					this.stats = {
+						hbs: (this.stats?.hbs ?? 0) + 1,
+						upSec: typeof evt.up_ms === "number" ? Math.round(evt.up_ms / 1000) : 0,
+						rx: typeof evt.rx === "number" ? evt.rx : 0,
+						bad: typeof evt.bad === "number" ? evt.bad : 0,
+					};
+				} else if (evt.evt === "boot") {
+					/* 上电/复位后 ESP 会主动报一声，顺带把统计清零 */
+					this.stats = { hbs: 0, upSec: 0, rx: 0, bad: 0 };
+				}
+			} catch {
+				/* 下行杂音，忽略 */
+			}
+		}
+		/* rxTail 无限增长只在协议对端乱发无换行数据时发生，兜一下 */
+		if (this.rxTail.length > 4096) this.rxTail = "";
+	}
+
+	/** 尽量把 pending 发出去；发不完的留给下一轮（drain 定时器会续） */
+	private flush(now: number): void {
+		if (this.pending.length === 0) return;
+		const fd = this.fd;
+		if (fd === null) return;
+
+		try {
+			const n = writeSync(fd, this.pending);
+			if (n <= 0) return; // 串口写满：剩下的留给下一轮
+			this.pending = this.pending.subarray(n);
+			if (this.pending.length === 0) this.lastWriteAt = now;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException)?.code;
+			if (code === "EAGAIN" || code === "EWOULDBLOCK") {
+				/* 串口缓冲满了（对端没在读），这一轮发不动而已，连接还是好的 */
+				return;
+			}
+			/* 设备被拔掉或复位了：关掉，过一会儿重新枚举 */
+			this.close();
+			this.retryAfter = now + RECONNECT_MS;
+		}
+	}
+
+	/**
+	 * 发送一行；force=true 时忽略节流。
+	 * @returns 这一行是否已经交给串口（可能还在 pending 里等下一轮补发）
+	 */
 	send(line: string, now: number, force = false): boolean {
 		if (!this.enabled) return false;
 		if (!force && now - this.lastWriteAt < WRITE_MIN_INTERVAL_MS) return false;
@@ -126,21 +268,14 @@ class SerialLink {
 		const fd = this.ensureOpen(now);
 		if (fd === null) return false;
 
-		try {
-			writeSync(fd, Buffer.from(`${line}\n`, "utf8"));
-			this.lastWriteAt = now;
-			return true;
-		} catch (error) {
-			const code = (error as NodeJS.ErrnoException)?.code;
-			if (code === "EAGAIN" || code === "EWOULDBLOCK") {
-				/* 串口缓冲满了（对端没在读），丢掉这一帧就好，连接还是好的 */
-				return false;
-			}
-			/* 设备被拔掉或复位了：关掉，过一会儿重新枚举 */
-			this.close();
-			this.retryAfter = now + RECONNECT_MS;
-			return false;
+		const frame = Buffer.from(`${line}\n`, "utf8");
+		if (this.pending.length + frame.length > PENDING_MAX) {
+			/* 对端长时间收不动：整块丢掉重来，宁可丢几帧也不能攒出半行粘在别人后面 */
+			this.pending = Buffer.alloc(0);
 		}
+		this.pending = Buffer.concat([this.pending, frame]);
+		this.flush(now);
+		return true;
 	}
 
 	close(): void {
@@ -152,6 +287,10 @@ class SerialLink {
 			}
 			this.fd = null;
 		}
+		this.pending = Buffer.alloc(0);
+		this.rxTail = "";
+		this.stats = null;
+		this.lastRxAt = 0;
 	}
 }
 
@@ -191,6 +330,7 @@ export default function (pi: ExtensionAPI) {
 	let lastCtxUsed = 0;
 	let lastCtxMax = 0;
 	let timer: ReturnType<typeof setInterval> | null = null;
+	let drainTimer: ReturnType<typeof setInterval> | null = null;
 	let notifiedMissing = false;
 
 	function effectiveState(now: number): AgentState {
@@ -292,12 +432,24 @@ export default function (pi: ExtensionAPI) {
 			/* 空闲时也要定期发，否则 ESP 会判成 NO HOST */
 			timer = setInterval(() => push(null, Date.now(), true), KEEPALIVE_MS);
 		}
+		if (drainTimer === null) {
+			/* 持续排空 ESP 的下行：不读会把 tty 缓冲涨满、反向拖死 ESP 的 RX。
+			 * 顺带把没发完的 pending 补发出去 */
+			drainTimer = setInterval(() => {
+				link.drain();
+			}, DRAIN_MS);
+			link.drain(); // 打开成功后立刻排一次，别等下一个周期
+		}
 	});
 
 	pi.on("session_shutdown", async () => {
 		if (timer !== null) {
 			clearInterval(timer);
 			timer = null;
+		}
+		if (drainTimer !== null) {
+			clearInterval(drainTimer);
+			drainTimer = null;
 		}
 		link.close();
 	});
@@ -503,7 +655,19 @@ export default function (pi: ExtensionAPI) {
 				}
 				default: {
 					const state = link.active ? (link.connected ? "已连接" : "重试中") : "已关闭";
-					ctx.ui.notify(`状态栏：${state}${link.path ? ` ${link.path}` : "（未探测到串口）"}`, "info");
+					const stats = link.espStats;
+					let esp: string;
+					if (stats === null) {
+						esp = "，还没收到 ESP 下行（检查接线、或对方有没有在跑）";
+					} else {
+						/* ESP 心跳默认 10s 一次，超过 25s 没下行说明对端已经不发了 */
+						const age = Math.max(0, Math.round((Date.now() - link.lastRxMs) / 1000));
+						esp = `，ESP 心跳 ${stats.hbs} 次 / up ${stats.upSec}s / ${age}s 前有下行，rx=${stats.rx} bad=${stats.bad}`;
+					}
+					ctx.ui.notify(
+						`状态栏：${state}${link.path ? ` ${link.path}` : "（未探测到串口）"}${esp}`,
+						"info",
+					);
 					return;
 				}
 			}

@@ -117,7 +117,11 @@ uv run tools/mock_status.py --send '{"state":"error","tps":0}'
 {"evt":"hb","up_ms":123456,"page":0,"rx":42,"bad":0}   // 默认每 10s
 ```
 
-ESP32 默认每 10s 发一次心跳；超过 5s 没收到 host 数据，屏幕显示 `NO HOST`。
+ESP32 默认每 10s 发一次心跳；超过 10s 没收到 host 数据，屏幕显示 `NO HOST`。
+
+> 协议是**双向**的：Pi 扩展用 `O_RDWR` 打开串口并持续读走 ESP 的下行（心跳/事件），
+> 还要把 tty 设成 `raw`。只写不读会让主机的 tty 缓冲涨满，反过来把 ESP 的 RX 一起
+> 拖死 —— 症状就是「agent 明明连着却偶现 `NO HOST`」。
 
 ## 目录结构
 
@@ -138,7 +142,8 @@ ESP32 默认每 10s 发一次心跳；超过 5s 没收到 host 数据，屏幕�
 `idf.py menuconfig` → **Vibe Coding Status Bar**：
 
 - **Display**：分辨率、I2C 引脚 / 频率 / 地址、`Invert colors`（黑白反了就打开）、镜像
-- **UI**：轮播间隔（默认 4000ms，0 关闭）、刷新周期（默认 200ms）、链路超时（默认 5000ms）、
+- **UI**：轮播间隔（默认 4000ms，0 关闭）、刷新周期（默认 200ms）、链路超时（默认 10000ms，
+  建议 ≥ 主机保活间隔的 3 倍）、
   开机自检开关
 - **USB Serial/JTAG link**：收发缓冲大小、单行最大长度、心跳间隔、是否打印每条收到的 JSON
 
@@ -152,6 +157,7 @@ ESP32 默认每 10s 发一次心跳；超过 5s 没收到 host 数据，屏幕�
 | 上电不自检、屏幕全黑 | 接线 / 供电 / `0x3C` 地址；试 `idf.py monitor` 看 I2C 是否 ACK |
 | 显示内容黑白反了 | menuconfig 打开 `Display → Invert colors` |
 | 屏幕一直 `NO HOST` | host 没在发数据；mock 脚本要记得先停 Pi 扩展 |
+| 明明连着却偶现 `NO HOST` | 串口**下行没人排空**（`TIOCINQ` 顶在 3920/4096 就是它），或 tty 没设 `raw` 导致回显污染。关掉 `idf.py monitor` 再看，别被它掩盖 |
 | 屏幕来回跳 | mock 脚本和 Pi 扩展同时在写串口，只能留一个 |
 | 串口打不开 | USB Serial/JTAG 需为副控制台（UART0 主），见 `sdkconfig.defaults` |
 | `idf.py size` 分区吃紧 | CJK 字库占 ~157KB，换小字库或关掉不用的字体 |

@@ -17,6 +17,15 @@
  * 下行事件（ESP -> host）：
  *   {"evt":"boot",...}   上电/复位后
  *   {"evt":"hb",...}     周期性心跳（可用 CONFIG_STATUS_BAR_HEARTBEAT_MS 关闭）
+ *
+ * 主机存活的判定：只有携带主机字段（state/ctx/in/out/tps/... 或 cmd）的行才算数，
+ * 光「是个合法 JSON」不够。原因：如果主机侧 tty 没关 ECHO，本机的下行事件会被
+ * 回灌进自己的 RX，此时若把它当主机数据，链路就永远不会判成断开。
+ *
+ * 主机侧注意事项（Pi 扩展已按此实现）：
+ *   串口要用 O_RDWR 打开并持续读干净，且把 tty 设成 raw（关掉 icanon/echo/ixon）。
+ *   只写不读会让 host 的 tty 输入队列（4KB）涨满，USB IN 方向没人消费 → 本机 TX 环
+ *   堵死 → 主机侧的写也跟着失败，表现为「agent 连着却偶现 NO HOST」。
  */
 #include "serial_link.h"
 
@@ -49,6 +58,20 @@ static int64_t  s_boot_us;
 
 /* ------------------------------ 发送 ------------------------------ */
 
+/*
+ * 发送一行。
+ *
+ * 这里刻意只等很短的时间（TX_TIMEOUT_MS）：
+ *   1. 本函数会被接收任务调用（心跳、pong/ack），一旦长时间阻塞，接收任务就停摆，
+ *      而主机的数据还在往里灌，主机那边的写就会失败 —— 屏幕上的表现是主机明明在发，
+ *      却闪 NO HOST。所以宁可丢这一帧，也不能把接收任务卡住。
+ *   2. 失败也不要打 WARN：日志走的是同一个 USB TX 环，环满时它自己也会被拦，
+ *      刷屏只会让情况更糟（而且 VFS 日志是逐字节写的，会把整行截断在中间）。
+ */
+#define TX_TIMEOUT_MS 20
+
+static uint32_t s_tx_dropped;   /* 因为 TX 环满而丢掉的帧数 */
+
 void serial_link_send_line(const char *line)
 {
     if (line == NULL) {
@@ -67,9 +90,10 @@ void serial_link_send_line(const char *line)
     memcpy(buf, line, len);
     buf[len] = '\n';
 
-    int written = usb_serial_jtag_write_bytes(buf, len + 1, pdMS_TO_TICKS(200));
+    int written = usb_serial_jtag_write_bytes(buf, len + 1, pdMS_TO_TICKS(TX_TIMEOUT_MS));
     if (written != (int)(len + 1)) {
-        ESP_LOGW(TAG, "USB 发送失败 (%d)", written);
+        s_tx_dropped++;
+        ESP_LOGD(TAG, "USB 发送失败 (%d)，已丢帧 %u 次", written, (unsigned)s_tx_dropped);
     }
 }
 
@@ -156,13 +180,16 @@ static void handle_json_line(char *line)
     ESP_LOGI(TAG, "recv %s", line);
 #endif
 
-    /* 任何合法 JSON 都算主机还活着 */
-    status_model_mark_rx();
-
+    /* 只有「真的带主机字段」的行才算主机还活着。
+     * 不能无脑把任何合法 JSON 都算进去：tty 的 ECHO 会把本机下行事件回灌回来
+     * （{"evt":"hb",...}），那样 ESP 拿自己的心跳当主机存活，断链检测就永远是 true。 */
     const cJSON *cmd = cJSON_GetObjectItem(obj, "cmd");
     if (cJSON_IsString(cmd)) {
+        status_model_mark_rx();
         handle_command(obj);
-    } else if (!status_model_apply_json(obj)) {
+    } else if (status_model_apply_json(obj)) {
+        status_model_mark_rx();
+    } else {
         ESP_LOGD(TAG, "没有可用字段: %.60s", line);
     }
 

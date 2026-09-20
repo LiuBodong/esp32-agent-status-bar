@@ -66,9 +66,11 @@ menu "Vibe Coding Status Bar"
 
         config STATUS_BAR_LINK_TIMEOUT_MS
             int "Host link timeout (ms)"
-            default 5000
+            default 10000
             help
                 超过该时间没有收到 host 数据，屏幕会提示 NO HOST。
+                建议至少是主机保活间隔（Pi 扩展默认 2s）的 3 倍：主机侧偶尔漏一帧
+                不该让屏幕闪 NO HOST。
 
         config STATUS_BAR_BOOT_SELFTEST
             bool "Flash the whole screen once at boot (bring-up check)"
