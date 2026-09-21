@@ -18,6 +18,9 @@
 
 static const char *TAG = "display";
 
+/* 面板句柄，留给显示开关（熄屏/亮屏）用 */
+static esp_lcd_panel_handle_t s_panel;
+
 #define LCD_H_RES CONFIG_STATUS_BAR_LCD_H_RES
 #define LCD_V_RES CONFIG_STATUS_BAR_LCD_V_RES
 
@@ -116,6 +119,20 @@ esp_err_t display_init(lv_display_t **out_disp)
     ESP_RETURN_ON_FALSE(disp != NULL, ESP_FAIL, TAG, "lvgl_port_add_disp failed");
 
     *out_disp = disp;
+    s_panel = panel;
     ESP_LOGI(TAG, "OLED %dx%d ready", LCD_H_RES, LCD_V_RES);
     return ESP_OK;
+}
+
+void display_set_on(bool on)
+{
+    if (s_panel == NULL) {
+        return;
+    }
+    /* SSD1306 的 0xAE/0xAF：只关掉显示驱动输出，GDDRAM 内容和 I2C 刷新都不受影响，
+     * 所以熄屏期间照常渲染，重新打开时面板上已经是最后一帧。 */
+    esp_err_t err = esp_lcd_panel_disp_on_off(s_panel, on);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "面板开关失败: %s", esp_err_to_name(err));
+    }
 }

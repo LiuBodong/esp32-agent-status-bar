@@ -22,13 +22,15 @@
  *           上下文占用百分比在副行，数值按 1000 进制阶梯退化（999 → 999，1000 → 1K）
  *   TOK 页：↑ 1.2k ↓ 567 —— 箭头来自 montserrat 符号、数字用主字体
  *
- * 没有收到过数据 / 链路超时 时，固定显示提示页。
+ * 没有收到过数据 / 链路超时 时，固定显示提示页；这种状态再持续
+ * CONFIG_STATUS_BAR_SCREEN_OFF_MS（默认 60s）就熄屏，等主机回来再亮。
  */
 #include "ui.h"
 
 #include <stdio.h>
 #include <string.h>
 
+#include "display.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lvgl_port.h"
@@ -136,6 +138,9 @@ static uint32_t  s_hold_until_ms;
 static bool      s_bar_visible;
 static bool      s_tok_row_shown;
 static bool      s_ctx_cache_shown;   /* CTX 主行右段是否占着位置 */
+static bool      s_screen_off;        /* 面板当前是否熄着 */
+static bool      s_link_down;         /* 当前是否算「没有主机」（含上电后从未连上） */
+static uint32_t  s_link_down_since_ms;
 
 /* ------------------------------ 文本工具 ------------------------------ */
 
@@ -469,6 +474,31 @@ static void ui_timer_cb(lv_timer_t *timer)
 
     agent_status_t st;
     status_model_get(&st);
+
+    /* 熄屏：没有主机（断链，或者上电后一直没连上）持续 CONFIG_STATUS_BAR_SCREEN_OFF_MS
+     * 就把面板关掉，等下一次收到 host 数据（link_up 变回 true）再亮回来。
+     *
+     * 熄屏期间不停止渲染：关显示只是关掉驱动输出，GDDRAM 写入照旧生效，
+     * 这样唤醒时面板上已经是最后一帧，不会先闪一下过期的 NO HOST。 */
+    if (st.link_up) {
+        s_link_down = false;
+    } else if (!s_link_down) {
+        s_link_down = true;
+        s_link_down_since_ms = now;
+    }
+
+    bool want_off = CONFIG_STATUS_BAR_SCREEN_OFF_MS > 0 && s_link_down &&
+                    (now - s_link_down_since_ms) >= (uint32_t)CONFIG_STATUS_BAR_SCREEN_OFF_MS;
+    if (want_off != s_screen_off) {
+        s_screen_off = want_off;
+        display_set_on(!want_off);
+        if (want_off) {
+            ESP_LOGI(TAG, "链路断开 %u 秒，熄屏",
+                     (unsigned)((now - s_link_down_since_ms) / 1000u));
+        } else {
+            ESP_LOGI(TAG, "host 恢复，亮屏");
+        }
+    }
 
     if (!st.host_seen) {
         render_pending();

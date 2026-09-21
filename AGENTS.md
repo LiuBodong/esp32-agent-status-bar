@@ -34,8 +34,8 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 
 | 路径                                 | 作用                                                                                       |
 | ------------------------------------ | ------------------------------------------------------------------------------------------ |
-| `main/display.c`                   | I2C 总线 + SSD1306 面板 + esp_lvgl_port 初始化                                             |
-| `main/ui.c`                        | LVGL 界面：左状态图标 + 右两行文本、2 页轮播、上电自检                                     |
+| `main/display.c`                   | I2C 总线 + SSD1306 面板 + esp_lvgl_port 初始化、面板开关（熄屏/亮屏）                      |
+| `main/ui.c`                        | LVGL 界面：左状态图标 + 右两行文本、2 页轮播、上电自检、断链熄屏                           |
 | `main/status_model.c`              | 状态模型 + cJSON 字段解析（互斥锁保护）                                                    |
 | `main/serial_link.c`               | USB Serial/JTAG 收发、命令处理、心跳；协议说明在文件头注释                                 |
 | `main/fonts/`                      | 副行用的思源黑体 13px ASCII 子集（lv_font_conv 生成）                                      |
@@ -89,6 +89,12 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
   **不要用 LVGL 内置 montserrat 排正文**：它的字形墨迹常宽于 advance（负边距），小字号会挤在一起；
   图标是单字形独立 label，不受影响
 - 动效一律跟着 UI 定时器走，**别用 `lv_anim`**：整屏缓冲 + full_refresh 下常驻动画会让 I2C 以 30fps 整帧刷屏
+- 断链熄屏：`link_up` 为假（含上电后一直没连上）持续 `CONFIG_STATUS_BAR_SCREEN_OFF_MS`
+  （默认 60s，0 = 常亮）就调 `display_set_on(false)` 发 SSD1306 的关显示命令，收到任何 host
+  数据（`mark_rx()` → `link_up` 变真）下一拍就亮回来。判断放在 `ui_timer_cb` 里，用
+  `s_link_down_since_ms` 自己计时 —— 别用 `host_gone` 或 `age_ms`，它们要么只覆盖 bye 场景，
+  要么在上电从未连上时是 0。**熄屏期间照常渲染**（不跳过 `render_*`）：关显示只关掉驱动输出，
+  GDDRAM 写入照样生效，这样唤醒那帧面板上已经是新内容，不会先闪一下过期的 `NO HOST`
 - `main/fonts/*.c` 由 lv_font_conv 生成，需要 `-DLV_LVGL_H_INCLUDE_SIMPLE`（见 `main/CMakeLists.txt`）
 - `main/Kconfig.projbuild` 里的 **bool 选项关闭时不生成宏**，判断要用 `#ifdef`
 

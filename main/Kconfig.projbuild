@@ -72,6 +72,14 @@ menu "Vibe Coding Status Bar"
                 建议至少是主机保活间隔（Pi 扩展默认 2s）的 3 倍：主机侧偶尔漏一帧
                 不该让屏幕闪 NO HOST。
 
+        config STATUS_BAR_SCREEN_OFF_MS
+            int "Blank the panel after the link is down for (ms, 0 = never)"
+            default 60000
+            help
+                没有主机（断链，或者上电后一直没连上）持续该时长后关闭面板显示，
+                等下一次收到 host 数据再亮回来。用来避免没人用的时候屏幕一直亮着。
+                填 0 表示永远不熄屏。
+
         config STATUS_BAR_BOOT_SELFTEST
             bool "Flash the whole screen once at boot (bring-up check)"
             default y
