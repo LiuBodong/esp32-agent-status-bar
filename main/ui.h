@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "lvgl.h"
@@ -44,6 +45,13 @@ void ui_show_page(int index, uint32_t hold_ms);
 
 /** @brief 当前正在显示的页面编号 */
 int ui_current_page(void);
+
+/**
+ * @brief 面板当前是否处于（断链导致的）熄屏状态
+ *
+ * 供状态灯复用同一份断链判定：屏幕熄了，灯也跟着灭，不用再维护一套计时。
+ */
+bool ui_screen_off(void);
 
 #ifdef __cplusplus
 }

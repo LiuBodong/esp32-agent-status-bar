@@ -12,3 +12,7 @@ dependencies:
   # LVGL 图形库（9.5 与 esp_lvgl_port 2.9 搭配验证过）
   # 主行字体直接用 LVGL 自带的 lv_font_source_han_sans_sc_14_cjk（见 sdkconfig.defaults）
   lvgl/lvgl: "~9.5.0"
+
+  # SK6812 RGBW 状态灯（RMT 后端，走 GPIO4）。托管组件，首次构建需代理下载：
+  #   export HTTPS_PROXY=http://localhost:7897 HTTP_PROXY=http://localhost:7897
+  espressif/led_strip: "^3.0.3"

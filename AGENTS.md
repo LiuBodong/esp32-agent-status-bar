@@ -19,13 +19,18 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 - 屏幕：SSD1315（寄存器兼容 SSD1306），128x32，**I2C**
   - **SDA = GPIO8，SCL = GPIO9**，400kHz，从机地址 0x3C，模块无 RESET 引脚
   - C3 的 USB 占用 GPIO18/19，选引脚时避开
+- 状态灯：SK6812 **RGBW 单灯珠**，数据脚 **GPIO4**（`Status LED → GPIO` 可改），RMT 驱动
+  - `5V` 供电（接 3V3 会不亮/极暗）、数据线串 330Ω、必须共地；`Din` 接反完全不亮但不烧
+  - 为什么不选别的脚：见 `docs/led_ctrol.md` 1.3（GPIO2/8/9 是 strapping，20/21 是 UART0）
 - 通信：USB Serial/JTAG（Espressif VID 303a，枚举为 `/dev/ttyACM0`）
   - 日志走 UART0（USB 是副控制台，不会抢 USJ 驱动），所以 Pi 扩展可以独占 USJ 收发
 
 ## 技术栈（版本不要随便动）
 
-- ESP-IDF **v6.1-dev**。v6 已移除内置的 `json`/cJSON 组件，所以用 `espressif/cjson`
+- ESP-IDF **6.2.0**（master；`git describe` 是 `v6.1-dev-8142-g188e3e55bb`，版本以
+  `tools/cmake/version.cmake` 的 6/2/0 为准）。v6 已移除内置的 `json`/cJSON 组件，所以用 `espressif/cjson`
 - LVGL **~9.5.0** + `espressif/esp_lvgl_port ^2.9.0`（这个组合验证过；9.6 太新没用过）
+- 状态灯用 `espressif/led_strip ^3.0.3`（RMT 后端）。托管组件，构建时要联网（挂代理）
 - Pi 扩展用 Pi 0.85.x 的 Extension API，已用其官方类型做过 `tsc --strict` 校验
 - CodeBuddy 侧没有进程内扩展 API，用 hooks（`SessionStart`/`SessionEnd`）+ 常驻 daemon，
   协议细节见下面的「CodeBuddy 接入」
@@ -37,6 +42,7 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 | `main/display.c`                   | I2C 总线 + SSD1306 面板 + esp_lvgl_port 初始化、面板开关（熄屏/亮屏）                      |
 | `main/ui.c`                        | LVGL 界面：左状态图标 + 右两行文本、2 页轮播、上电自检、断链熄屏                           |
 | `main/status_model.c`              | 状态模型 + cJSON 字段解析（互斥锁保护）                                                    |
+| `main/status_led.c`                | SK6812 状态灯：RMT 驱动、亮度、灯效任务、上电 R/G/B/W 自检                                 |
 | `main/serial_link.c`               | USB Serial/JTAG 收发、命令处理、心跳；协议说明在文件头注释                                 |
 | `main/fonts/`                      | 副行用的思源黑体 13px ASCII 子集（lv_font_conv 生成）                                      |
 | `tools/mock_status.py`             | 不依赖 Pi，直接给屏幕灌模拟数据（PEP 723，`uv run`）                                     |
@@ -45,6 +51,22 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 | `pi-extension/esp32-status-bar.ts` | Pi 扩展；用`cp` 装到 `~/.pi/agent/extensions/`，**改完要重新拷并重开会话才生效** |
 
 ## 关键约定与坑
+
+### 组件与工具链
+
+- **托管组件只能由组件管理器下载，不能把上游 git 仓库整体拷进 `managed_components/`**。
+  手拷的目录没有 `.component_hash`（registry 包另外还带 `CHECKSUMS.json`），IDF 6.x 在 cmake
+  配置阶段直接报 `File .component_hash or CHECKSUMS.json ... does not exist or cannot be parsed`
+  并中止。默认非 strict 模式（`IDF_COMPONENT_STRICT_CHECKSUM` 没开）只比对 `.component_hash`
+  的**内容**、不逐文件校验，所以缺这个文件就是硬错误、没得商量。修法：删掉该组件目录
+  （`managed_components/` 和 `dependencies.lock` 都在 `.gitignore` 里，可安全重建），挂代理
+  重跑 `idf.py reconfigure`（build 目录残缺就先删掉再跑）。一眼分辨来源：目录里带
+  `.devcontainer` / `.pre-commit-config.yaml` / `SConscript` 的是 git 版，不是 registry 包
+- **GCC 16 的 `-Wformat-truncation` 在 `-Werror` 下会因 `snprintf` 拼接多个 `%s` 而报错**。
+  它按实参的**缓冲区上限**推最坏长度：`"%s t/s  %s"` 配 `speed[12]` + `elapsed[16]` 就是
+  11 + 6 + 15 + 1（结束符）= 33 字节，目标缓冲 32 就过不了（实际内容远短，是保守误报）。
+  修法：把目标缓冲配到 ≥「各子串上限之和 + 1」（`ui.c:render_page()` 的 `sub_text` 因此取 40）。
+  `%f`（如 `%.1f`）不在推断范围内、走参数化 `out_size` 的也不报，别去动那些
 
 ### 显示
 
@@ -98,6 +120,34 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 - `main/fonts/*.c` 由 lv_font_conv 生成，需要 `-DLV_LVGL_H_INCLUDE_SIMPLE`（见 `main/CMakeLists.txt`）
 - `main/Kconfig.projbuild` 里的 **bool 选项关闭时不生成宏**，判断要用 `#ifdef`
 
+### 状态灯（SK6812 RGBW）
+
+- `main/status_led.c` 用托管组件 `espressif/led_strip`（RMT 后端）。它是**托管组件**，
+  首次构建要挂代理下载（`docs/led_ctrol.md` 坑 5）；`main/CMakeLists.txt` 还要显式
+  `REQUIRES esp_driver_rmt`（`led_strip_rmt.h` 里用到 `RMT_CLK_SRC_DEFAULT`）
+- C3 的 RMT 只有 4 个通道、**其中 2 个能做 TX**，led_strip 占掉 1 个。以后再加灯带 /
+  红外收发之类的注意别把 TX 抢完
+- **初始化不要用 `ESP_ERROR_CHECK`**（坑 3：失败走 abort，反而看不到原因）。`status_led_init()`
+  失败只返回错误码，`app_main` 里 `ESP_LOGW` 一声继续跑 —— 灯坏了不该把屏幕和串口链路一起拖垮
+- **工具链必须是 GCC**（坑 1）：clang 下 RMT 传输完成中断不触发，而 `led_strip_refresh()` 内部是
+  `rmt_tx_wait_all_done(chan, -1)`（**永久等待**），会无声卡死。所以**上电自检和灯效都跑在灯效
+  任务里、不在 `status_led_init()`（= `app_main`）里** —— 最坏情况只是这个任务停摆，屏幕和串口
+  链路照常工作；放 init 里会让一个可选外设把整机启动卡死。换工具链后必须 `idf.py fullclean`
+- 字节序按批次可能是 GRBW（默认）或 RGBW，点红亮绿就开 `Status LED → Use RGBW byte order`。
+  上电自检依次点 R/G/B/W 就是为了一眼看出这个（也是确认接线的手段）
+- 亮度管线是 **先 gamma 再乘主亮度**：`out = (v*v/255) * brightness / 255`（`scale_ch()`）。
+  顺序别反 —— 先缩放再 gamma 等于把亮度压两次，会暗到看不见。默认 40/255（约 16%）
+- 白灯走 **W 通道**（`white()`），彩色走 RGB（`hsv()` 只在 RGB 上算）
+- 灯效跑在**独立 FreeRTOS 任务**里（`CONFIG_STATUS_BAR_LED_REFRESH_MS`，默认 40ms ≈ 25fps），
+  **不要挂 LVGL 定时器** —— 那个跑在 LVGL 任务里，而屏幕整屏缓冲 + full_refresh 已经把 I2C 占满
+- 断链 / 熄屏联动直接复用 `ui_screen_off()`（`ui.c` 里那份断链计时）：屏幕熄了灯一起灭。
+  **不要再维护一套断链计时**，否则两边会不同步
+- 亮度 / 开关是「串口任务写、灯效任务读」，用互斥锁保护（`output_cfg_get()`）；
+  `{"cmd":"led"}` 改的亮度**不落盘**，重启回 Kconfig 默认
+- 灯效映射见 `fx_for_state()`：idle 青呼吸 / thinking 彩虹转 / running 蓝脉冲 / tool 绿双闪 /
+  waiting 琥珀快呼吸 / done 绿三连闪渐隐 / error 红 2Hz 闪；没主机（含上电未连）是白灯双拍心跳。
+  单灯珠做不了尾焰/流水，所以「炫」全押在色相旋转 + 呼吸上
+
 ### 通信协议
 
 一行一条 JSON、`\n` 结尾，只有以 `{` 开头的行会被解析；字段全部可选、大小写不敏感：
@@ -107,7 +157,10 @@ ESP32-C3 + SSD1315（0.96 寸 128x32 单色 OLED）的 Agent 状态指示器：P
 ```
 
 - `state`：`idle|thinking|running|tool|waiting|done|error`，也接受任意自定义字符串
-- 字段别名、命令（`ping`/`page`/`clear`/`bye`）与下行事件（`boot`/`hb`/`pong`）见 `main/serial_link.c` 头部注释
+- 字段别名、命令（`ping`/`page`/`clear`/`led`/`bye`）与下行事件（`boot`/`hb`/`pong`/`ack`）
+  见 `main/serial_link.c` 头部注释
+- `{"cmd":"led","brightness":40,"on":true}` 调状态灯，两个字段都可选（都不给 = 查询当前值），
+  回 `{"evt":"ack","cmd":"led","brightness":40,"on":1}`。亮度夹到 0..255，**不落盘**
 - `{"cmd":"bye"}` 是主机主动退出（Pi 扩展在 `session_shutdown` 且 `reason=quit` 时发），
   ESP 收到后把 `host_gone` 置位 → 立刻按断链渲染（`NO HOST` + 副行 `host exit`），
   不必等 10s 超时。**`session_shutdown` 在切换/新建/分叉会话时也会发（`reason` 不是 `quit`），
@@ -178,6 +231,11 @@ hook 只负责递路径和收工通知，**不负责拉起 daemon**：daemon 由
 ### 调试
 
 - 上电自检：整屏点亮 400ms（`CONFIG_STATUS_BAR_BOOT_SELFTEST=y`）。看不到 → 查接线/供电，不是字体问题
+- 状态灯上电自检：R/G/B/W 各 150ms（`Status LED → Sweep R/G/B/W once at boot`）。
+  灯全不亮 → 查 `Din`/共地/供电；颜色错 → 字节序；
+  屏幕串口都正常但灯常绿且不做自检 → 工具链是 clang（见上面「状态灯」一节）
+- 直接用串口测灯：`{"cmd":"led","brightness":120}` / `{"cmd":"led","on":false}`（回 ack 带实际值），
+  或 `uv run tools/mock_status.py --send '{"cmd":"led","brightness":120}'`
 - `idf.py monitor` 常驻占用串口不影响 Pi 扩展（它只读、扩展只写）。但要注意 monitor
   会顺带把 tty 设成 raw 并把积压读走，所以**开着 monitor 时现象会消失**，别被它骗了
 - 查链路是否健康：`TIOCINQ` 应该只有几十字节；ESP 心跳里的 `rx`/`bad` 里
@@ -198,6 +256,7 @@ hook 只负责递路径和收工通知，**不负责拉起 daemon**：daemon 由
 idf.py build
 idf.py -p /dev/ttyACM0 flash monitor     # 刷机并看日志
 uv run tools/mock_status.py              # 灌模拟数据（先停掉 Pi 扩展）
+uv run tools/mock_status.py --led-brightness 24   # 顺手把状态灯调暗（或 --led-off）
 ```
 
 CodeBuddy 侧（daemon 和 mock_status 抢同一个串口，别同时跑；也别和 Pi 扩展同时跑）：
@@ -206,6 +265,8 @@ CodeBuddy 侧（daemon 和 mock_status 抢同一个串口，别同时跑；也�
 uv run tools/cb-status-daemon.py --dry-run          # 先不占串口，看要发的帧对不对
 uv run tools/cb-status-daemon.py --ctx-max 200000   # 真机；窗口大小 transcript 里没有，必须给
 uv run tools/cb-status-daemon.py --replay -t <会话.jsonl>   # 离线快放，验证状态机
+uv run tools/cb-status-daemon.py --led-brightness 24       # 顺手把状态灯调暗（或 --led-off）
 ```
 
-Pi 交互里：`/statusbar`（看连接状态）、`/statusbar test`（发演示数据）、`/statusbar port <设备>`、`/statusbar on|off`
+Pi 交互里：`/statusbar`（看连接状态，含状态灯亮度）、`/statusbar test`（发演示数据）、
+`/statusbar port <设备>`、`/statusbar on|off`、`/statusbar led <0-255|on|off>`

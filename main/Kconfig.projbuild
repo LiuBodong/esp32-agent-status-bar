@@ -89,6 +89,56 @@ menu "Vibe Coding Status Bar"
 
     endmenu
 
+    menu "Status LED (SK6812 RGBW)"
+
+        config STATUS_BAR_LED_ENABLE
+            bool "Enable the SK6812 status LED"
+            default y
+            help
+                关掉后不再初始化 RMT 灯带，也不起灯效任务（串口的 led 命令会静默失效）。
+
+        config STATUS_BAR_LED_GPIO
+            int "SK6812 data GPIO"
+            default 4
+            depends on STATUS_BAR_LED_ENABLE
+            help
+                数据线接灯珠的 Din（单颗使用时 Dout 悬空）。中间建议串 330Ω。
+                避开 strapping 脚（GPIO2/8/9）、UART0（GPIO20/21）和 USB（GPIO18/19）。
+
+        config STATUS_BAR_LED_BRIGHTNESS
+            int "Default brightness (0-255, 255 = full)"
+            range 0 255
+            default 40
+            depends on STATUS_BAR_LED_ENABLE
+            help
+                主亮度，默认压到 40/255（约 16%），单色屏旁边一颗小灯不至于晃眼。
+                运行时可用串口 {"cmd":"led","brightness":N} 临时改，但不落盘，重启回到这里。
+
+        config STATUS_BAR_LED_RGBW_ORDER
+            bool "Use RGBW byte order instead of GRBW"
+            default n
+            depends on STATUS_BAR_LED_ENABLE
+            help
+                SK6812 RGBW 的字节序按厂家批次可能是 GRBW（默认）或 RGBW。
+                点红亮绿 = 序反了，把这个打开；再不对就按 docs/led_ctrol.md 坑 2 自定义。
+
+        config STATUS_BAR_LED_REFRESH_MS
+            int "Effect refresh period (ms)"
+            range 10 500
+            default 40
+            depends on STATUS_BAR_LED_ENABLE
+            help
+                灯效任务的刷新周期，默认 40ms（约 25fps）。调大更省电，但呼吸/旋转会变卡。
+
+        config STATUS_BAR_LED_BOOT_SELFTEST
+            bool "Sweep R/G/B/W once at boot"
+            default y
+            depends on STATUS_BAR_LED_ENABLE
+            help
+                上电依次点亮红/绿/蓝/白各 150ms：确认接线，也能一眼看出字节序对不对。
+
+    endmenu
+
     menu "USB Serial/JTAG link"
 
         config STATUS_BAR_RX_BUFFER_SIZE

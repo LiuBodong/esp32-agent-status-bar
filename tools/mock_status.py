@@ -11,6 +11,7 @@
     uv run tools/mock_status.py --mode loop          # 循环演示
     uv run tools/mock_status.py --mode idle          # 只发空闲状态
     uv run tools/mock_status.py --send '{"state":"error","tps":0}'   # 手发一条
+    uv run tools/mock_status.py --led-brightness 24  # 顺便把状态灯调暗（或 --led-off）
 
 屏幕上会实时轮播显示：状态/耗时、上下文占用、输入输出 token 与 TPS。
 """
@@ -135,6 +136,13 @@ def main() -> int:
     parser.add_argument("--mode", choices=["demo", "loop", "idle"], default="demo",
                         help="demo=跑一遍完整回合; loop=循环 demo; idle=持续发空闲状态")
     parser.add_argument("--send", default=None, help="直接发送一条 JSON 后退出")
+    parser.add_argument(
+        "--led-brightness",
+        type=int,
+        default=None,
+        help="开始前把状态灯亮度设成 0..255（不落盘，ESP 重启回 Kconfig 默认）",
+    )
+    parser.add_argument("--led-off", action="store_true", help="开始前关掉状态灯")
     parser.add_argument("--quiet", action="store_true", help="不打印 ESP32 回传的内容")
     args = parser.parse_args()
 
@@ -149,6 +157,12 @@ def main() -> int:
     stop = threading.Event()
     if not args.quiet:
         threading.Thread(target=reader_loop, args=(ser, stop), daemon=True).start()
+
+    # 状态灯参数：先发一次，后面演示过程中屏幕的灯效就能按指定亮度看
+    if args.led_off:
+        send(ser, {"cmd": "led", "on": False})
+    elif args.led_brightness is not None:
+        send(ser, {"cmd": "led", "brightness": max(0, min(255, args.led_brightness))})
 
     try:
         if args.send:

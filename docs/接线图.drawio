@@ -1,0 +1,125 @@
+<mxfile host="app.diagrams.net" agent="CodeBuddy" version="24.7.17" type="device">
+  <diagram id="esp32c3-sk6812-wiring" name="接线图">
+    <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="826" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- 标题 -->
+        <mxCell id="title" value="ESP32-C3 Super Mini 控制 SK6812 RGBW LED 接线图" style="text;html=1;fontSize=22;fontStyle=1;align=center;verticalAlign=middle;fontColor=#111827;" vertex="1" parent="1">
+          <mxGeometry x="270" y="20" width="640" height="36" as="geometry" />
+        </mxCell>
+
+        <!-- 图例 -->
+        <mxCell id="legend" value="&lt;font color='#dc2626'&gt;━&lt;/font&gt; 5V 电源线 　 &lt;font color='#111827'&gt;━&lt;/font&gt; GND 地线 　 &lt;font color='#2563eb'&gt;━&lt;/font&gt; 数据线 　 &lt;font color='#b45309'&gt;〰&lt;/font&gt; 电阻" style="text;html=1;fontSize=12;align=left;verticalAlign=middle;fontColor=#334155;" vertex="1" parent="1">
+          <mxGeometry x="60" y="62" width="560" height="24" as="geometry" />
+        </mxCell>
+
+        <!-- ============ ESP32-C3 开发板 ============ -->
+        <mxCell id="esp_board" value="ESP32-C3 Super Mini" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1f2937;strokeColor=#0f172a;fontColor=#f9fafb;fontSize=16;fontStyle=1;verticalAlign=top;spacingTop=10;arcSize=6;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="100" width="280" height="440" as="geometry" />
+        </mxCell>
+
+        <mxCell id="esp_note" value="数据脚：GPIO4&lt;br&gt;（可改用其它空闲 GPIO）&lt;br&gt;&lt;br&gt;避开：&lt;br&gt;GPIO8　板载 LED&lt;br&gt;GPIO9　BOOT 按键&lt;br&gt;GPIO20/21　串口日志&lt;br&gt;&lt;br&gt;5V 取自板载 USB-C 供电&lt;br&gt;GND 必须与 LED 共地" style="text;html=1;align=left;verticalAlign=top;fontSize=12;fontColor=#e5e7eb;spacingLeft=6;" vertex="1" parent="1">
+          <mxGeometry x="70" y="146" width="260" height="220" as="geometry" />
+        </mxCell>
+
+        <!-- ESP32 侧引脚 -->
+        <mxCell id="pin_5v" value="5V" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#dc2626;fontColor=#7f1d1d;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="340" y="170" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="pin_io4" value="GPIO4" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontColor=#1e3a8a;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="340" y="270" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="pin_gnd" value="GND" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e5e7eb;strokeColor=#111827;fontColor=#111827;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="340" y="370" width="60" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- ============ SK6812 LED 模块 ============ -->
+        <mxCell id="led_board" value="SK6812 RGBW LED 模块&lt;br&gt;（单颗 / 可级联灯带）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef9c3;strokeColor=#ca8a04;fontColor=#713f12;fontSize=15;fontStyle=1;verticalAlign=top;spacingTop=10;arcSize=6;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="640" y="100" width="240" height="440" as="geometry" />
+        </mxCell>
+
+        <mxCell id="led_note" value="Din　= 数据输入（接 MCU）&lt;br&gt;Dout = 数据输出（级联下一颗）&lt;br&gt;&lt;br&gt;注意：Din / Dout 不可接反，&lt;br&gt;接反则不亮。" style="text;html=1;align=left;verticalAlign=top;fontSize=12;fontColor=#713f12;" vertex="1" parent="1">
+          <mxGeometry x="652" y="160" width="220" height="130" as="geometry" />
+        </mxCell>
+
+        <!-- SK6812 侧焊盘 -->
+        <mxCell id="pad_5v" value="5V" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#dc2626;fontColor=#7f1d1d;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="580" y="170" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="pad_din" value="Din" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontColor=#1e3a8a;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="580" y="270" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="pad_gnd" value="GND" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e5e7eb;strokeColor=#111827;fontColor=#111827;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="580" y="370" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="pad_dout" value="Dout" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f1f5f9;strokeColor=#64748b;fontColor=#475569;fontStyle=1;fontSize=13;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="580" y="460" width="60" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="dout_note" value="悬空 / 接下一颗的 Din" style="text;html=1;fontSize=11;align=right;verticalAlign=middle;fontColor=#92400e;" vertex="1" parent="1">
+          <mxGeometry x="400" y="460" width="170" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- ============ 导线 ============ -->
+        <mxCell id="wire_5v" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=none;endFill=0;strokeColor=#dc2626;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="pin_5v" target="pad_5v">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- 数据线：GPIO4 → R1 → Din -->
+        <mxCell id="wire_din_a" style="edgeStyle=none;rounded=0;html=1;endArrow=none;endFill=0;strokeColor=#2563eb;strokeWidth=2;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="400" y="285" as="sourcePoint" />
+            <mxPoint x="462" y="285" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="r1_resistor" value="" style="edgeStyle=none;rounded=0;html=1;endArrow=none;endFill=0;strokeColor=#b45309;strokeWidth=2;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="462" y="285" as="sourcePoint" />
+            <mxPoint x="518" y="285" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="468" y="285" />
+              <mxPoint x="472" y="272" />
+              <mxPoint x="479" y="298" />
+              <mxPoint x="486" y="272" />
+              <mxPoint x="493" y="298" />
+              <mxPoint x="500" y="272" />
+              <mxPoint x="507" y="298" />
+              <mxPoint x="512" y="285" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="wire_din_b" style="edgeStyle=none;rounded=0;html=1;endArrow=none;endFill=0;strokeColor=#2563eb;strokeWidth=2;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="518" y="285" as="sourcePoint" />
+            <mxPoint x="580" y="285" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="wire_gnd" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=none;endFill=0;strokeColor=#111827;strokeWidth=2;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="pin_gnd" target="pad_gnd">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- 导线标签 -->
+        <mxCell id="lbl_5v" value="5V 供电" style="text;html=1;fontSize=12;align=center;verticalAlign=middle;fontColor=#b91c1c;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="158" width="100" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="lbl_r1" value="R1　330Ω　数据限流" style="text;html=1;fontSize=12;align=center;verticalAlign=middle;fontColor=#b45309;fontStyle=1;labelBackgroundColor=#ffffff;spacing=2;" vertex="1" parent="1">
+          <mxGeometry x="400" y="230" width="180" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="lbl_gnd" value="GND 共地" style="text;html=1;fontSize=12;align=center;verticalAlign=middle;fontColor=#111827;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="358" width="100" height="24" as="geometry" />
+        </mxCell>
+
+        <!-- ============ 说明 ============ -->
+        <mxCell id="notes_box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8fafc;strokeColor=#94a3b8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="570" width="820" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="notes_title" value="注意事项" style="text;html=1;fontSize=13;fontStyle=1;align=left;verticalAlign=middle;fontColor=#0f172a;" vertex="1" parent="1">
+          <mxGeometry x="72" y="580" width="200" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="notes" value="1. 供电：SK6812 工作电压为 5V，接 ESP32-C3 的 5V 引脚（USB-C 供电时约 5V）。切勿接 3V3。&lt;br&gt;2. 共地：ESP32 与 LED 模块的 GND 必须连接，否则数据信号无法识别。&lt;br&gt;3. 电阻 R1（串在数据线上）：GPIO4 → R1 → Din，两端不分正反。推荐 330Ω，实际 300~500Ω 均可。&lt;br&gt;　　作用：抑制信号反射与尖峰，保护首颗 LED 的数据输入脚；请靠近 LED 端焊接效果更好。&lt;br&gt;4. 数据：Dout 为级联输出，单颗使用时悬空；多颗时 Dout 接下一颗的 Din。&lt;br&gt;5. 电平：ESP32-C3 为 3.3V 逻辑，驱动 5V 供电的 SK6812 通常可行；若出现闪烁/不亮，可加 3.3V→5V 电平转换（如 74HCT125），或将 LED 供电降到 4.5V 左右。&lt;br&gt;6. 保护（长灯带建议）：5V 与 GND 间并联 100~1000µF 电解电容。" style="text;html=1;align=left;verticalAlign=top;fontSize=12;fontColor=#334155;" vertex="1" parent="1">
+          <mxGeometry x="72" y="606" width="796" height="160" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

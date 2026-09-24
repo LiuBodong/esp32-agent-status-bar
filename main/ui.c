@@ -377,7 +377,10 @@ static void render_lost(const agent_status_t *st)
 static void render_page(const agent_status_t *st, uint32_t now_ms)
 {
     char main_text[40];
-    char sub_text[32];
+    /* 40 而非 32：下面 TOK 页要用 "%s t/s  %s" 拼两个子串，按各自缓冲区的
+     * 最坏长度算 11 + 6 + 15 + 1（结束符）= 33 字节，32 会被 GCC 16 的
+     * -Wformat-truncation 判为可能截断（-Werror 下直接编译失败） */
+    char sub_text[40];
     char cache_text[12];
 
     set_icon(state_symbol(st->state), now_ms);
@@ -692,4 +695,9 @@ void ui_show_page(int index, uint32_t hold_ms)
 int ui_current_page(void)
 {
     return (int)s_page;
+}
+
+bool ui_screen_off(void)
+{
+    return s_screen_off;
 }

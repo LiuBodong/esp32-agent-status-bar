@@ -4,6 +4,7 @@ idf_component_register(
         "display.c"
         "ui.c"
         "status_model.c"
+        "status_led.c"
         "serial_link.c"
         "fonts/lv_font_source_han_sans_cn_13_ascii.c"
     INCLUDE_DIRS "." "fonts"
@@ -12,6 +13,7 @@ idf_component_register(
         esp_timer
         esp_driver_i2c
         esp_driver_usb_serial_jtag
+        esp_driver_rmt          # led_strip 的 RMT 后端（led_strip_rmt.h 里要用 RMT_CLK_SRC_DEFAULT 等）
 )
 
 # lv_font_conv 生成的字体文件默认 #include "lvgl/lvgl.h"，

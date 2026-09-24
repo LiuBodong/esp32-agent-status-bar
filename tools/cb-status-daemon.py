@@ -39,6 +39,7 @@ providerData.conversationRequestId 是「用户轮」级别，不能拿来去重
     uv run tools/cb-status-daemon.py -t /path/to.jsonl   # 指定会话文件
     uv run tools/cb-status-daemon.py --dry-run           # 不开串口，只打印要发的帧
     uv run tools/cb-status-daemon.py --replay -t x.jsonl  # 离线快放一遍，看状态机输出
+    uv run tools/cb-status-daemon.py --led-brightness 24  # 顺便把状态灯调暗（或 --led-off）
 
 和 hook 的分工（hook 脚本见 tools/cb-status-hook.py）：
     * 没装 hook 也能跑：靠扫描项目目录里最新的 .jsonl，只是同项目开两个会话会挑错
@@ -569,6 +570,15 @@ def run(args: argparse.Namespace) -> int:
     paused = False
     seen_rec: dict | None = None
 
+    # 状态灯参数：串口（重）连上之后下发一次。ESP 重启会回到 Kconfig 默认值，
+    # 所以断线重连后要再发一遍，而不是只在进程启动时发一次。
+    led_cmd: dict[str, Any] | None = None
+    if args.led_off:
+        led_cmd = {"cmd": "led", "on": False}
+    elif args.led_brightness is not None:
+        led_cmd = {"cmd": "led", "brightness": max(0, min(255, args.led_brightness))}
+    led_applied = False
+
     while not stop["flag"]:
         now_mono = time.monotonic()
         now = time.time()
@@ -607,6 +617,19 @@ def run(args: argparse.Namespace) -> int:
 
         link.ensure(now_mono)
         link.drain()
+
+        if led_cmd is not None:
+            if args.dry_run:
+                if not led_applied:
+                    led_applied = True
+                    log(
+                        f"[led] dry-run，不占串口：{json.dumps(led_cmd, ensure_ascii=True)}"
+                    )
+            elif link.ser is None:
+                led_applied = False  # 掉线了，等重连上再补发
+            elif not led_applied and link.send(led_cmd):
+                led_applied = True
+                log(f"[led] 已下发 {json.dumps(led_cmd, ensure_ascii=True)}")
 
         frame = tracker.frame(now)
         # 状态或数字变了就发；没变也要按 KEEPALIVE_S 发一次，否则 ESP 判 NO HOST。
@@ -667,6 +690,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--limit", type=int, default=0, help="--replay 时最多处理多少条"
+    )
+    parser.add_argument(
+        "--led-brightness",
+        type=int,
+        default=None,
+        help="启动后把状态灯亮度设成 0..255（不落盘，ESP 重启回 Kconfig 默认）",
+    )
+    parser.add_argument(
+        "--led-off", action="store_true", help="启动后关掉状态灯（串口乱入的临时开关）"
     )
     parser.add_argument("--quiet", action="store_true", help="不打印每帧")
     args = parser.parse_args()

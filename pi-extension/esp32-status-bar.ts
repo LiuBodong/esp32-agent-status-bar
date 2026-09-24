@@ -23,7 +23,7 @@
  *     和主机的真数据按字节交错粘成半行，ESP 解析失败并把回显当成主机存活。
  *     所以打开后立刻 stty raw（Node 没有 tcsetattr，只能借系统命令）。
  *
- * 运行中可用 /statusbar 命令查看状态、换端口、临时关闭或发测试数据。
+ * 运行中可用 /statusbar 命令查看状态、换端口、临时关闭、发测试数据，或调状态灯亮度。
  */
 
 import { spawnSync } from "node:child_process";
@@ -100,6 +100,14 @@ interface EspStats {
 	bad: number;
 }
 
+/** ESP 回 ack 里带回来的状态灯设置（/statusbar led 之后刷新） */
+interface LedState {
+	/** 主亮度 0..255 */
+	brightness: number;
+	/** 整灯是否开着 */
+	on: boolean;
+}
+
 class SerialLink {
 	private fd: number | null = null;
 	private port: string | null;
@@ -115,6 +123,7 @@ class SerialLink {
 	private rawModeWarned = false;
 	private lastRxAt = 0;
 	private stats: EspStats | null = null;
+	private led: LedState | null = null;
 
 	constructor(port: string | null) {
 		this.port = port;
@@ -139,6 +148,11 @@ class SerialLink {
 
 	get espStats(): EspStats | null {
 		return this.stats;
+	}
+
+	/** 最近一次 led ack 带回来的状态灯设置（null = 还没发过 / 对端没回） */
+	get ledState(): LedState | null {
+		return this.led;
 	}
 
 	usePort(port: string | null): void {
@@ -236,8 +250,16 @@ class SerialLink {
 						bad: typeof evt.bad === "number" ? evt.bad : 0,
 					};
 				} else if (evt.evt === "boot") {
-					/* 上电/复位后 ESP 会主动报一声，顺带把统计清零 */
+					/* 上电/复位后 ESP 会主动报一声，顺带把统计清零。
+					 * 状态灯也会回落到 Kconfig 默认值，本地这份也跟着失效 */
 					this.stats = { hbs: 0, upSec: 0, rx: 0, bad: 0 };
+					this.led = null;
+				} else if (evt.evt === "ack" && evt.cmd === "led") {
+					/* /statusbar led 之后 ESP 会把夹紧后的实际值回过来 */
+					this.led = {
+						brightness: typeof evt.brightness === "number" ? evt.brightness : 0,
+						on: evt.on === 1 || evt.on === true,
+					};
 				}
 			} catch {
 				/* 下行杂音，忽略 */
@@ -303,6 +325,7 @@ class SerialLink {
 		this.pending = Buffer.alloc(0);
 		this.rxTail = "";
 		this.stats = null;
+		this.led = null;
 		this.lastRxAt = 0;
 	}
 
@@ -727,7 +750,7 @@ export default function (pi: ExtensionAPI) {
 	/* ------------------------------ 命令 ------------------------------ */
 
 	pi.registerCommand("statusbar", {
-		description: "ESP32 状态栏：status / port <设备> / on / off / test",
+		description: "ESP32 状态栏：status / port <设备> / on / off / test / led <0-255|on|off>",
 		handler: async (args, ctx) => {
 			const [action, value] = (args ?? "").trim().split(/\s+/);
 
@@ -751,6 +774,33 @@ export default function (pi: ExtensionAPI) {
 				case "off": {
 					link.setEnabled(false);
 					ctx.ui.notify("状态栏输出已关闭", "info");
+					return;
+				}
+				case "led": {
+					if (!value) {
+						ctx.ui.notify("用法：/statusbar led <0-255> | on | off", "warning");
+						return;
+					}
+					const arg = value.toLowerCase();
+					const payload: Record<string, unknown> = { cmd: "led" };
+					let label: string;
+					if (arg === "on" || arg === "off") {
+						payload.on = arg === "on";
+						label = arg;
+					} else {
+						const level = Number(value);
+						if (!Number.isFinite(level) || level < 0 || level > 255) {
+							ctx.ui.notify("状态灯亮度要 0..255，或者用 on / off", "warning");
+							return;
+						}
+						payload.brightness = Math.round(level);
+						label = `${payload.brightness}/255`;
+					}
+					const ok = link.send(JSON.stringify(payload), Date.now(), true);
+					ctx.ui.notify(
+						ok ? `状态灯：${label}` : "串口不可用，请检查设备连接或 /statusbar port",
+						ok ? "info" : "warning",
+					);
 					return;
 				}
 				case "test": {
@@ -784,11 +834,13 @@ export default function (pi: ExtensionAPI) {
 						const age = Math.max(0, Math.round((Date.now() - link.lastRxMs) / 1000));
 						esp = `，ESP 心跳 ${stats.hbs} 次 / up ${stats.upSec}s / ${age}s 前有下行，rx=${stats.rx} bad=${stats.bad}`;
 					}
+					const led = link.ledState;
+					const ledText = led === null ? "" : `，状态灯 ${led.on ? `${led.brightness}/255` : "已关"}`;
 					ctx.ui.notify(
 						`状态栏：${state}${link.path ? ` ${link.path}` : "（未探测到串口）"}${esp}` +
 							`，本会话 ↑${snap.tokensIn} ↓${snap.tokensOut}` +
 							`，ctx ${lastCtxPct < 0 ? "?" : `${lastCtxPct.toFixed(1)}%`}` +
-							`，cache ${snap.cachePct < 0 ? "?" : `${snap.cachePct.toFixed(1)}%`}`,
+							`，cache ${snap.cachePct < 0 ? "?" : `${snap.cachePct.toFixed(1)}%`}${ledText}`,
 						"info",
 					);
 					return;

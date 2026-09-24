@@ -15,6 +15,9 @@
  *   {"cmd":"page","index":1,"hold":10}     -> 切到第 1 页并保持 10 秒；index=-1 恢复自动轮播
  *                                             （共 2 页：0=CTX，1=TOK；超出会取模）
  *   {"cmd":"clear"}                        -> 清空统计
+ *   {"cmd":"led","brightness":40,"on":true}
+ *                                          -> 运行时调状态灯：brightness 0..255，on 开关整灯，
+ *                                             两个字段都可选；都不给就是查询，回当前值
  *   {"cmd":"bye"}                          -> host 要退出了：立刻按断链渲染（副行显示 host exit），
  *                                             不必等 STATUS_BAR_LINK_TIMEOUT_MS 超时。不回 ack
  *
@@ -35,6 +38,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cJSON.h"
@@ -46,6 +50,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "status_model.h"
+#include "status_led.h"
 #include "ui.h"
 
 static const char *TAG = "link";
@@ -123,6 +128,45 @@ static uint32_t uptime_ms(void)
     return (uint32_t)(up / 1000);
 }
 
+/** 取一个 0..255 的数值字段（数字或数字字符串都接受），越界夹紧 */
+static bool json_u8(const cJSON *item, uint8_t *out)
+{
+    double v;
+    if (cJSON_IsNumber(item)) {
+        v = item->valuedouble;
+    } else if (cJSON_IsString(item) && item->valuestring != NULL) {
+        char *end = NULL;
+        v = strtod(item->valuestring, &end);
+        if (end == NULL || end == item->valuestring) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    if (v < 0.0) {
+        v = 0.0;
+    }
+    if (v > 255.0) {
+        v = 255.0;
+    }
+    *out = (uint8_t)(v + 0.5);
+    return true;
+}
+
+/** 取一个布尔字段：接受 bool，也接受 0/1 这类数字 */
+static bool json_bool(const cJSON *item, bool *out)
+{
+    if (cJSON_IsBool(item)) {
+        *out = cJSON_IsTrue(item);
+        return true;
+    }
+    if (cJSON_IsNumber(item)) {
+        *out = item->valuedouble != 0.0;
+        return true;
+    }
+    return false;
+}
+
 static void handle_command(const cJSON *obj)
 {
     const cJSON *cmd = cJSON_GetObjectItem(obj, "cmd");
@@ -162,6 +206,22 @@ static void handle_command(const cJSON *obj)
     if (strcmp(cmd->valuestring, "clear") == 0) {
         status_model_reset();
         send_jsonf("{\"evt\":\"ack\",\"cmd\":\"clear\"}");
+        return;
+    }
+
+    if (strcmp(cmd->valuestring, "led") == 0) {
+        /* 亮度/开关都能单独给；都不给（或者给了不认识的字段）就是查询当前值。
+         * 亮度刻意不落盘：断电重启回 Kconfig 的默认亮度，避免把屏幕调瞎后找不回来。 */
+        uint8_t brightness = 0;
+        bool on = true;
+        if (json_u8(cJSON_GetObjectItem(obj, "brightness"), &brightness)) {
+            status_led_set_brightness(brightness);
+        }
+        if (json_bool(cJSON_GetObjectItem(obj, "on"), &on)) {
+            status_led_set_enabled(on);
+        }
+        send_jsonf("{\"evt\":\"ack\",\"cmd\":\"led\",\"brightness\":%u,\"on\":%d}",
+                   (unsigned)status_led_brightness(), status_led_enabled() ? 1 : 0);
         return;
     }
 

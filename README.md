@@ -19,23 +19,50 @@
 右侧 2 页自动轮播；链路断了会固定显示 `NO HOST`（副行 `lost Ns` 是超时，`host exit` 是
 主机主动退出）。
 
+ESP32 旁边那颗 SK6812 状态灯用灯效复述同一份状态，不用回头盯屏幕也能扫一眼：
+
+| 场景 | 颜色 | 灯效 |
+|---|---|---|
+| 没主机（未连 / 断链） | 白 | 双拍心跳，1.5s 一组 |
+| 空闲 | 青 | 极慢呼吸 |
+| 思考 | 彩虹 | 色相 4s 转一圈 + 呼吸起伏 |
+| 生成 | 蓝 | 1s 脉冲 |
+| 跑工具 | 绿 | 双闪后停顿（像磁盘活动灯） |
+| 等确认 / 等输入 | 琥珀 | 快呼吸 |
+| 完成 | 绿 | 三连闪后渐隐 |
+| 出错 | 红 | 2Hz 硬闪 |
+
+没主机持续到熄屏（默认 60s）时，灯和屏幕一起灭。
+
 ## 硬件
 
 | 项目 | 规格 |
 |---|---|
 | 主控 | ESP32-C3，2MB flash（单 app 分区 1MB，固件约占 78%） |
 | 屏幕 | SSD1315（寄存器兼容 SSD1306），128x32 单色 OLED，I2C |
-| 接线 | **SDA = GPIO8，SCL = GPIO9**，400kHz，从机地址 `0x3C`，模块无 RESET 脚 |
-| 供电 | 屏 VCC 接 3V3，GND 共地 |
+| 屏幕接线 | **SDA = GPIO8，SCL = GPIO9**，400kHz，从机地址 `0x3C`，模块无 RESET 脚 |
+| 状态灯 | SK6812 RGBW 单灯珠，数据脚 **GPIO4**（`Status LED → GPIO` 可改），RMT 驱动 |
+| 供电 | 屏 VCC 接 3V3；灯珠接 **5V**、GND 共地，数据线中间串 330Ω |
 
 ESP32-C3 的 USB 占用 GPIO18/19，这两脚别接别的东西。
+
+灯珠三根线：`5V` → 5V（接 3V3 会不亮或极暗），`Din` → GPIO4（**接成 `Dout` 完全不亮**，
+但不会烧），`GND` → 必须和 ESP32 共地。上电会依次点亮红/绿/蓝/白各 150ms 做自检
+（`Status LED → Sweep R/G/B/W once at boot`），点红亮绿说明字节序是 RGBW，打开
+`Status LED → Use RGBW byte order` 即可。完整接线/排查记录见 `docs/led_ctrol.md`。
+
+状态灯默认亮度只有 **40/255**（约 16%），跑起来是个安静的小指示灯；嫌亮/嫌暗改
+`Status LED → Default brightness`，或者用串口/`/statusbar led` 临时热调。
 
 ## 快速开始
 
 ### 1. 编译烧录
 
 需要 ESP-IDF **v6.1**（或更新）。`idf.py` 会自动按 `main/idf_component.yml` 拉取
-LVGL 9.5 / esp_lvgl_port 2.9 / cjson 依赖。
+LVGL 9.5 / esp_lvgl_port 2.9 / cjson / led_strip 依赖。首次构建需要联网下载托管组件，
+国内建议先挂代理（`export HTTPS_PROXY=http://localhost:7897 HTTP_PROXY=http://localhost:7897`）；
+另外确保工具链是 **GCC**（`unset IDF_TOOLCHAIN`），clang 下 RMT 会静默卡死，见
+`docs/led_ctrol.md` 坑 1。
 
 ```bash
 idf.py set-target esp32c3          # 首次
@@ -63,6 +90,7 @@ ln -s "$PWD/pi-extension/esp32-status-bar.ts" ~/.pi/agent/extensions/
 | `/statusbar test` | 发一段演示数据，不依赖 agent 状态，用来验证屏幕 |
 | `/statusbar port /dev/ttyACM1` | 换串口 |
 | `/statusbar on` / `off` | 临时开关推流 |
+| `/statusbar led 24` | 状态灯亮度调到 24/255（`on` / `off` 开关整灯） |
 
 ### 3. 不装 Pi 也能测
 
@@ -70,6 +98,7 @@ ln -s "$PWD/pi-extension/esp32-status-bar.ts" ~/.pi/agent/extensions/
 uv run tools/mock_status.py              # 跑一遍完整的思考→生成→调工具→完成
 uv run tools/mock_status.py --mode loop  # 循环
 uv run tools/mock_status.py --send '{"state":"error","tps":0}'
+uv run tools/mock_status.py --led-brightness 24   # 顺便把状态灯调暗（或 --led-off）
 ```
 
 脚本是 PEP 723 格式，`uv` 会自己准备 pyserial 环境，无需手动装依赖。
@@ -116,8 +145,13 @@ uv run tools/mock_status.py --send '{"state":"error","tps":0}'
 {"cmd":"ping"}                       // → {"evt":"pong","up_ms":...,"page":...,"rx":...,"bad":...}
 {"cmd":"page","index":1,"hold":10}   // 切到第 1 页并保持 10 秒；index=-1 恢复自动轮播
 {"cmd":"clear"}                      // 清空统计
+{"cmd":"led","brightness":40,"on":true}  // 调状态灯；字段可选，都不给就是查询
 {"cmd":"bye"}                        // host 要退出了：立刻按断链渲染（副行 host exit），不用等超时
 ```
+
+`led` 命令回 `{"evt":"ack","cmd":"led","brightness":40,"on":1}`。`brightness` 夹到 0..255，
+`on` 开关整灯。**这个设置不落盘**：断电重启回到 Kconfig 的 `Default brightness`，
+免得调暗之后找不回来。
 
 `bye` 由 Pi 扩展在真正退出时（`session_shutdown` 且 `reason=quit`）发出。切换/新建/分叉
 会话也会触发同一个事件，那几种情况不发，否则屏幕会白闪一下。超时断链仍然显示
@@ -144,6 +178,7 @@ ESP32 默认每 10s 发一次心跳；超过 10s 没收到 host 数据，屏幕�
 | `main/display.c` | I2C 总线 + SSD1306 面板 + esp_lvgl_port 初始化 |
 | `main/ui.c` | LVGL 界面：状态图标、两行文本、2 页轮播、上电自检 |
 | `main/status_model.c` | 状态模型 + cJSON 字段解析（互斥锁保护，供 UI 任务读） |
+| `main/status_led.c` | SK6812 状态灯：RMT 驱动、亮度、灯效任务、上电自检 |
 | `main/serial_link.c` | USB Serial/JTAG 收发、命令处理、心跳 |
 | `main/fonts/` | 副行用的思源黑体 13px ASCII 子集（lv_font_conv 生成） |
 | `pi-extension/esp32-status-bar.ts` | Pi 扩展：监听 agent 事件 → 推 JSON |
@@ -155,6 +190,8 @@ ESP32 默认每 10s 发一次心跳；超过 10s 没收到 host 数据，屏幕�
 `idf.py menuconfig` → **Vibe Coding Status Bar**：
 
 - **Display**：分辨率、I2C 引脚 / 频率 / 地址、`Invert colors`（黑白反了就打开）、镜像
+- **Status LED**：开关、数据脚（默认 GPIO4）、默认亮度（默认 40/255）、RGBW 字节序、
+  灯效刷新周期、上电 R/G/B/W 自检
 - **UI**：轮播间隔（默认 4000ms，0 关闭）、刷新周期（默认 200ms）、链路超时（默认 10000ms，
   建议 ≥ 主机保活间隔的 3 倍）、
   开机自检开关
@@ -173,4 +210,9 @@ ESP32 默认每 10s 发一次心跳；超过 10s 没收到 host 数据，屏幕�
 | 明明连着却偶现 `NO HOST` | 串口**下行没人排空**（`TIOCINQ` 顶在 3920/4096 就是它），或 tty 没设 `raw` 导致回显污染。关掉 `idf.py monitor` 再看，别被它掩盖 |
 | 屏幕来回跳 | mock 脚本和 Pi 扩展同时在写串口，只能留一个 |
 | 串口打不开 | USB Serial/JTAG 需为副控制台（UART0 主），见 `sdkconfig.defaults` |
+| 状态灯完全不亮 | 数据线接的是 `Din` 还是 `Dout`？有没有共地？灯珠供电实测是不是 5V？见 `docs/led_ctrol.md` 第 7 节 |
+| 状态灯颜色不对（点红亮绿） | 字节序，打开 `Status LED → Use RGBW byte order` |
+| 屏幕和串口都正常，但状态灯不亮/常绿、也不做上电自检 | 工具链是 clang（RMT 传输完成中断不触发，`refresh` 会永久等待）：`unset IDF_TOOLCHAIN && idf.py fullclean` 后用 GCC 重编 |
+| 状态灯太亮 / 太暗 | `Status LED → Default brightness`，或运行时 `/statusbar led <0-255>` |
+| 构建卡在 `Solving dependencies` | 拉 `led_strip` 托管组件需要代理，见「快速开始 → 编译烧录」 |
 | `idf.py size` 分区吃紧 | CJK 字库占 ~157KB，换小字库或关掉不用的字体 |
